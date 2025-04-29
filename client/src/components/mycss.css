@@ -1,0 +1,46 @@
+/* src/components/Chat.css */
+
+/* 定位到包含滚动条的元素 */
+.message-list-scrollbar {
+    /* 标准 CSS (效果有限，主要对 Firefox 有效) */
+    scrollbar-width: thin; /* 可以是 auto, thin, none */
+    scrollbar-color: #a0a0a0 #f1f1f1; /* thumb颜色 track颜色 */
+}
+
+/* WebKit 浏览器 (Chrome, Safari, Edge) 的详细样式 */
+.message-list-scrollbar::-webkit-scrollbar {
+    width: 8px; /* 滚动条宽度 */
+    height: 8px; /* 水平滚动条高度 (如果需要) */
+}
+
+/* 滚动条轨道 (背景) */
+.message-list-scrollbar::-webkit-scrollbar-track {
+    background: #f1f1f1; /* 轨道颜色，浅灰色 */
+    border-radius: 10px; /* 可选：轨道的圆角 */
+}
+
+/* 滚动条滑块 (可拖动部分) */
+.message-list-scrollbar::-webkit-scrollbar-thumb {
+    background: #a0a0a0; /* 滑块颜色，稍深的灰色 */
+    border-radius: 10px; /* 滑块的圆角 */
+    border: 1px solid #f1f1f1; /* 可选：给滑块添加一个细边框，增加对比度 */
+}
+
+/* 滑块鼠标悬停时 (可选) */
+.message-list-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #888; /* 悬停时颜色变深 */
+}
+
+/* 可选：滚动条两端的按钮 (通常不常用) */
+/*
+.message-list-scrollbar::-webkit-scrollbar-button {
+  display: none;
+}
+*/
+
+/* 可选：轨道和滑块相交的角落 (通常不常用) */
+/*
+.message-list-scrollbar::-webkit-scrollbar-corner {
+  background: #f1f1f1;
+}
+*/
