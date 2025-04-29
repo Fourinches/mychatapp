@@ -1,37 +1,22 @@
-// models/Message.js
+// server/models/Message.js
 const mongoose = require('mongoose');
 
-const MessageSchema = new mongoose.Schema({
-    sender: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User', // 关联到 User 模型
-        required: true,
-    },
-    messageType: { // 使用新字段区分类型
-        type: String,
-        enum: ['text', 'image', 'video', 'file'], // 添加可能的文件类型
-        required: true,
-        default: 'text',
-    },
-    content: { // 文本内容，对于文件消息可以为空
-        type: String,
-        // 不再强制要求，因为文件消息没有文本内容
-        // required: function() { return this.messageType === 'text'; }
-    },
-    fileUrl: { // 存储文件的可访问 URL
-        type: String,
-        // required: function() { return this.messageType !== 'text'; } // 文件消息必需
-    },
-    mimeType: { // 存储文件的 MIME 类型 (e.g., 'image/jpeg', 'video/mp4')
-        type: String,
-        // required: function() { return this.messageType !== 'text'; } // 文件消息必需
-    },
-    // 你之前的 schema 没有 timestamps: true，所以我们保留手动 default
-    timestamp: {
-        type: Date,
-        default: Date.now,
-    },
-    // 注意：你之前的 schema 只有一个 contentType 字段，我们现在用 messageType, fileUrl, mimeType 替代它和 content 的部分功能
-}, { timestamps: true }); // 推荐添加 timestamps: true 自动管理 createdAt/updatedAt
+const messageSchema = new mongoose.Schema({
+    sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    recipient: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false, index: true },
+    roomId: { type: String, required: false, index: true },
+    isPrivate: { type: Boolean, default: false, required: true, index: true },
+    messageType: { type: String, required: true }, // 'text', 'image', 'video', 'file'
+    content: { type: String, trim: true },
+    fileUrl: { type: String },
+    mimeType: { type: String },
+    originalFilename: { type: String },
+}, { timestamps: true });
 
-module.exports = mongoose.model('Message', MessageSchema);
+// 复合索引优化私聊查询
+messageSchema.index({ sender: 1, recipient: 1, isPrivate: 1, timestamp: -1 });
+messageSchema.index({ recipient: 1, sender: 1, isPrivate: 1, timestamp: -1 });
+// 群聊索引（如果使用）
+messageSchema.index({ roomId: 1, isPrivate: 1, timestamp: -1 });
+
+module.exports = mongoose.model('Message', messageSchema);

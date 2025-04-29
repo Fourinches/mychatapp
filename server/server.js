@@ -1,144 +1,170 @@
-require("dotenv").config(); // 首先加载环境变量
+// server/server.js (最终完整版)
+require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
-const connectDB = require('./config/db'); // 数据库连接文件
-const authRouter = require("./routes/auth"); // 认证路由
-const Message = require("./models/Message");   // 消息模型
+const connectDB = require('./config/db');
+const authRouter = require("./routes/auth");
+const friendRouter = require("./routes/friendRoutes"); // 引入好友路由
+const Message = require("./models/Message");
 const jwt = require("jsonwebtoken");
-const User = require("./models/User");       // 用户模型
+const User = require("./models/User");
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const authMiddleware = require('./middleware/authMiddleware');
 
-connectDB(); // 连接数据库
+connectDB();
 
 const app = express();
-app.use(cors()); // 允许跨域
-app.use(express.json()); // 解析 JSON 请求体
-app.use('/api/auth', authRouter); // 使用认证路由
+app.use(cors());
+app.use(express.json());
+
+// --- API 路由 ---
+app.use('/api/auth', authRouter);
+app.use('/api/friends', friendRouter); // 使用好友路由
+
+// --- 文件上传 ---
+const uploadDir = 'uploads';
+if (!fs.existsSync(uploadDir)){ fs.mkdirSync(uploadDir); console.log(`创建上传目录: ${uploadDir}`); }
+const storage = multer.diskStorage({ destination: (req, file, cb) => cb(null, uploadDir + '/'), filename: (req, file, cb) => { const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9); cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname)); } });
+const upload = multer({ storage: storage, limits: { fileSize: 1024 * 1024 * 50 } });
+// 考虑添加 authMiddleware 保护上传接口
+app.post('/api/upload', upload.single('file'), (req, res) => {
+    console.log("[/api/upload] 收到请求");
+    if (!req.file) { console.error("[/api/upload] 错误：未收到文件"); return res.status(400).json({ msg: '没有文件被上传。' }); }
+    console.log("[/api/upload] Multer 处理成功:", req.file.filename);
+    const fileUrl = `${req.protocol}://${req.get('host')}/${uploadDir}/${req.file.filename}`;
+    res.json({ url: fileUrl, mimeType: req.file.mimetype }); // 只返回必需信息
+});
+app.use(`/${uploadDir}`, express.static(path.join(__dirname, uploadDir)));
+// ----------------
 
 const server = http.createServer(app);
-const io = new Server(server, {
-    cors: {
-        origin: "http://localhost:3000", // 允许你的 React 前端访问
-        methods: ["GET", "POST"],
-    },
-});
+const io = new Server(server, { cors: { origin: "http://localhost:3000", methods: ["GET", "POST"] } });
 
-// 基本的根路由，确认服务器运行
-app.get("/", (req, res) => {
-    res.send("Chat Server is running!");
-});
+app.get("/", (req, res) => { res.send("Chat Server is running!"); });
 
-// Socket.IO 认证中间件
+// --- 用户 Socket 映射 ---
+const userSockets = new Map(); // userId(string) -> Set<socketId(string)>
+const socketUsers = new Map(); // socketId(string) -> userId(string)
+// ---------------------------
+
+// --- Socket.IO 认证中间件 ---
 io.use(async (socket, next) => {
     try {
         const token = socket.handshake.auth.token;
-        if (!token) {
-            console.log("Socket Auth Error: No token provided");
-            return next(new Error('Authentication error: No token provided'));
-        }
-
+        if (!token) return next(new Error('认证错误: 没有提供 token'));
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await User.findById(decoded.user.id).select('-password');
-        if (!user) {
-            console.log("Socket Auth Error: User not found for token");
-            return next(new Error('Authentication error: User not found'));
-        }
-
-        socket.user = user; // 将用户信息附加到 socket
-        console.log(`Socket authenticated for user: ${user.username} (ID: ${user.id})`);
-        next(); // 认证成功
-
-    } catch (err) {
-        console.error("Socket Auth Error:", err.message);
-        let errMsg = 'Authentication error';
-        if (err.name === 'JsonWebTokenError') errMsg = 'Authentication error: Invalid token';
-        if (err.name === 'TokenExpiredError') errMsg = 'Authentication error: Token expired';
-        next(new Error(errMsg)); // 认证失败
-    }
+        const user = await User.findById(decoded.user.id).select('-password'); // 不再 populate friends
+        if (!user) return next(new Error('认证错误: 用户未找到'));
+        socket.user = user; // 附加基础用户信息
+        console.log(`[Auth Middleware] Socket authenticated for user: ${user.username} (ID: ${user.id})`);
+        next();
+    } catch (err) { console.error("Socket 认证错误:", err.message); next(new Error('认证错误')); }
 });
 
-// --- WebSocket 连接处理 ---
-io.on('connection', async (socket) => { // <--- 设为 async 以便使用 await
-    console.log(`用户 ${socket.user.username} (${socket.id}) 连接成功`);
-
-    // --- 新增：发送历史消息给刚连接的用户 ---
+// --- 辅助函数：通知好友状态更新 ---
+const notifyFriendStatus = async (userId, isOnline, ioInstance) => {
+    const userIdStr = userId.toString();
+    console.log(`[Notify Status] 开始通知用户 [${userIdStr}] 的好友状态 (状态: ${isOnline ? '在线' : '离线'})`);
     try {
-        // 查询数据库中最近的 N 条消息 (例如最近 50 条)
-        const messageHistory = await Message.find()
-            .sort({ timestamp: -1 }) // 1. 按时间戳降序获取最新的
-            .limit(50)               // 2. 限制数量
-            .populate('sender', 'username _id') // 3. 填充发送者信息
-            .sort({ timestamp: 1 }); // 4. 结果反转为升序 (旧->新)，方便前端显示
+        const userWithFriends = await User.findById(userIdStr).select('friends'); // 查询好友列表
+        if (!userWithFriends?.friends?.length) { console.log(`[Notify Status] 用户 [${userIdStr}] 没有好友需要通知。`); return; }
+        const friendIds = userWithFriends.friends.map(f => f.friend.toString());
+        console.log(`[Notify Status] 用户 [${userIdStr}] 的好友 IDs:`, friendIds);
+        friendIds.forEach(friendIdStr => {
+            const friendSocketIds = userSockets.get(friendIdStr);
+            if (friendSocketIds?.size > 0) {
+                friendSocketIds.forEach(socketId => {
+                    ioInstance.to(socketId).emit('friendStatusUpdate', { userId: userIdStr, isOnline });
+                    console.log(`  [Notify Status] 已发送状态更新给好友 [${friendIdStr}] (Socket: ${socketId})`);
+                });
+            }
+        });
+    } catch (error) { console.error(`[Notify Status] 通知好友状态时出错 (用户: ${userIdStr}):`, error); }
+};
 
-        // 使用 socket.emit 只发送给当前连接的这个 socket
-        socket.emit('loadHistory', messageHistory);
-        console.log(`已发送 ${messageHistory.length} 条历史消息给 ${socket.user.username}`);
+// --- WebSocket 连接处理 ---
+io.on('connection', (socket) => {
+    const userId = socket.user.id.toString();
+    const username = socket.user.username;
+    console.log(`[Connection] 用户 ${username} (${userId}) 使用 Socket ID: ${socket.id} 连接成功`);
 
-    } catch (error) {
-        console.error(`获取或发送历史消息给 ${socket.user.username} 时出错:`, error);
-        // 可以在此向客户端发送错误事件，如果需要的话
-        // socket.emit('historyError', { error: 'Failed to load message history.' });
+    // 管理用户 Socket 映射
+    let isFirstConnection = false;
+    if (!userSockets.has(userId)) { userSockets.set(userId, new Set()); isFirstConnection = true; }
+    userSockets.get(userId).add(socket.id);
+    socketUsers.set(socket.id, userId);
+    console.log(`[Connection] 当前在线用户数: ${userSockets.size}, Sockets:`, [...socketUsers.keys()].length);
+
+    // 通知好友上线 (仅首次连接)
+    if (isFirstConnection) {
+        console.log(`[Connection] 用户 ${username} 首次连接，通知好友上线...`);
+        notifyFriendStatus(userId, true, io); // 调用辅助函数
     }
-    // --- 结束新增部分 ---
 
-
-    // --- 监听客户端的 'sendMessage' 事件 ---
-    socket.on('sendMessage', async (data) => {
-        const messageContent = data.text?.trim(); // 获取并清理文本
-
-        if (!messageContent) {
-            return socket.emit('messageError', { error: 'Cannot send empty message' });
-        }
-        if (messageContent.length > 500) { // 示例长度限制
-            return socket.emit('messageError', { error: 'Message is too long' });
-        }
-
+    // 处理获取好友列表请求
+    socket.on('getFriendList', async () => {
+        console.log(`[getFriendList] 用户 ${username} 请求好友列表`);
         try {
-            // 创建并保存消息到数据库
-            const newMessage = new Message({
-                sender: socket.user.id, // 从认证中间件获取 ID
-                contentType: 'text',
-                content: messageContent,
-                // timestamp 字段通常由 Mongoose 自动添加 (如果 schema 中定义了 timestamps: true)
-                // 或者在 new Message 时手动设置: timestamp: new Date()
-            });
-            await newMessage.save();
-            console.log(`消息已保存: ${newMessage.content} by ${socket.user.username}`);
+            const userWithPopulatedFriends = await User.findById(userId).populate({ path: 'friends.friend', select: 'username _id' });
+            if (!userWithPopulatedFriends) return socket.emit('friendListUpdate', []);
+            const friendListWithStatusAndGroup = userWithPopulatedFriends.friends.map(f => { if (!f?.friend?._id) return null; const friendIdStr = f.friend._id.toString(); return { id: friendIdStr, username: f.friend.username, group: f.group || '默认分组', isOnline: userSockets.has(friendIdStr) }; }).filter(f => f !== null);
+            socket.emit('friendListUpdate', friendListWithStatusAndGroup);
+            console.log(`[getFriendList] 已发送好友列表给 ${username} (${friendListWithStatusAndGroup.length} 人)`);
+        } catch(err) { console.error(`[getFriendList] Error for ${username}:`, err); socket.emit('friendListUpdate', []); }
+    });
 
-            // 填充发送者信息以便广播
-            const populatedMessage = await Message.findById(newMessage._id)
-                .populate('sender', 'username _id'); // 只填充需要的字段
+    // 处理获取私聊历史记录请求
+    socket.on('getPrivateHistory', async ({ friendId }) => {
+        if (!friendId) {console.warn(`[getPrivateHistory] 缺少 friendId`); return;}
+        console.log(`[getPrivateHistory] ${username} (${userId}) 请求与 ${friendId} 的历史`);
+        try {
+            const messages = await Message.find({ isPrivate: true, $or: [{ sender: userId, recipient: friendId }, { sender: friendId, recipient: userId }] })
+                .sort({ timestamp: -1 }).limit(50).populate('sender', 'username _id').sort({ timestamp: 1 });
+            socket.emit('privateHistory', { friendId: friendId, history: messages });
+            console.log(`[getPrivateHistory] 已发送 ${messages.length} 条记录 (与 ${friendId}) 给 ${username}`);
+        } catch (error) { console.error(`[getPrivateHistory] Error (${userId}<=>${friendId}):`, error); socket.emit('messageError', { error: '无法加载私聊记录' }); }
+    });
 
-            // 使用 io.emit 广播给所有连接的客户端
-            io.emit('newMessage', populatedMessage);
-            console.log(`消息 ${populatedMessage._id} 已广播`);
+    // 处理发送消息
+    socket.on('sendMessage', async (data) => {
+        console.log("[sendMessage] 收到事件, data:", data);
+        if (!data?.type) return socket.emit('messageError', { error: '无效的消息数据格式' });
+        const isPrivate = !!data.recipientId; const recipientId = isPrivate ? data.recipientId.toString() : null;
+        if (isPrivate && recipientId === userId) return socket.emit('messageError', { error: '不能给自己发送私聊消息' });
+        let newMessageData = { sender: userId, messageType: data.type, isPrivate: isPrivate, recipient: recipientId, roomId: null, content: '', fileUrl: null, mimeType: null, originalFilename: null }; let logMessageType = '';
+        if (data.type === 'text') { const msg = data.text?.trim(); if (!msg || msg.length > 500) return socket.emit('messageError', { error: '文本消息为空或过长' }); newMessageData.content = msg; logMessageType = '文本'; }
+        else if (data.type === 'file') { if (!data.url || !data.mimeType) return socket.emit('messageError', { error: '文件消息缺少 url 或 mimeType' }); newMessageData.fileUrl = data.url; newMessageData.mimeType = data.mimeType; newMessageData.originalFilename = data.originalFilename; if (data.mimeType.startsWith('image/')) { newMessageData.messageType = 'image'; logMessageType = '图片'; } else if (data.mimeType.startsWith('video/')) { newMessageData.messageType = 'video'; logMessageType = '视频'; } else { newMessageData.messageType = 'file'; logMessageType = '文件'; } }
+        else { return socket.emit('messageError', { error: '不支持的消息类型' }); }
+        try { const newMessage = new Message(newMessageData); await newMessage.save(); console.log(`[sendMessage] ${logMessageType} 消息已保存 by ${username}`, newMessageData); const populatedMessage = await Message.findById(newMessage._id).populate('sender', 'username _id'); console.log("[sendMessage] 准备发送/广播:", populatedMessage); if (isPrivate) { logMessageType += ` 私聊 to ${recipientId}`; const senderSocketIds = userSockets.get(userId) || new Set(); const recipientSocketIds = userSockets.get(recipientId) || new Set(); const targetSocketIds = new Set([...senderSocketIds, ...recipientSocketIds]); if (targetSocketIds.size > 0) { targetSocketIds.forEach(socketId => { io.to(socketId).emit('receivePrivateMessage', populatedMessage); }); console.log(`[sendMessage] ${logMessageType} 消息 ${populatedMessage._id} 已发送给 ${targetSocketIds.size} sockets`); } else { console.log(`[sendMessage] 私聊消息 ${populatedMessage._id} 已保存, 但接收者 ${recipientId} 不在线`); } } else { logMessageType += " 公共"; io.emit('newMessage', populatedMessage); console.log(`[sendMessage] ${logMessageType} 消息 ${populatedMessage._id} 已广播`); } } catch (error) { console.error(`[sendMessage] 保存或发送 ${logMessageType} 消息时出错:`, error); socket.emit('messageError', { error: '处理消息失败。' }); }
+    });
 
-        } catch (error) {
-            console.error('保存或广播消息时出错:', error);
-            socket.emit('messageError', { error: 'Failed to send message due to server error.' });
+    // 处理断开连接
+    socket.on('disconnect', (reason) => {
+        const disconnectedUserId = socketUsers.get(socket.id);
+        console.log(`[Disconnect] 用户 ${disconnectedUserId} 的连接 (${socket.id}) 断开, 原因: ${reason}`);
+        if (disconnectedUserId) {
+            const userSocketSet = userSockets.get(disconnectedUserId);
+            if (userSocketSet) {
+                userSocketSet.delete(socket.id);
+                if (userSocketSet.size === 0) {
+                    userSockets.delete(disconnectedUserId); // 从在线映射中移除
+                    console.log(`[Disconnect] 用户 ${disconnectedUserId} 所有连接已断开.`);
+                    notifyFriendStatus(disconnectedUserId, false, io); // 通知好友下线
+                }
+            }
         }
+        socketUsers.delete(socket.id); // 清理反向映射
+        console.log(`[Disconnect] 断开连接后在线用户数: ${userSockets.size}`);
     });
 
-    // --- 处理客户端断开连接 ---
-    socket.on('disconnect', () => {
-        // 检查 socket.user 是否存在，因为断开连接时可能认证已失败或未完成
-        if (socket.user) {
-            console.log(`用户 ${socket.user.username} (${socket.id}) 断开`);
-            // 可以在这里广播用户离开的消息（如果需要）
-            // io.emit('userLeft', { username: socket.user.username, id: socket.user.id });
-        } else {
-            console.log(`一个未认证的 socket (${socket.id}) 断开`);
-        }
-    });
-
-    // 可选：处理基本的 socket 错误
-    socket.on('error', (err) => {
-        console.error(`Socket 错误 (${socket.user?.username || socket.id}):`, err.message);
-    });
+    // 处理 Socket 错误
+    socket.on('error', (err) => { console.error(`[Socket Error] 用户 ${socket.user?.username} (${socket.id}):`, err); });
 
 }); // io.on('connection', ...) 结束
 
-const PORT = process.env.PORT || 5000; // 使用环境变量或默认 5000
-
+const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`服务器正在端口 ${PORT} 上运行`));
