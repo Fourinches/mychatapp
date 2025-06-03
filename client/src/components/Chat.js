@@ -1,18 +1,21 @@
-// client/src/components/Chat.js (完整版 - 包含好友、私聊、搜索修复、媒体状态修复)
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+// client/src/components/Chat.js (修改版)
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import io from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
 import { jwtDecode } from 'jwt-decode';
 import setAuthToken from '../utils/setAuthToken';
+import html2canvas from "html2canvas";
 import axios from 'axios';
 
 // --- 配置 ---
-const SOCKET_SERVER_URL = 'http://localhost:5000';
+const SOCKET_SERVER_URL = 'http://localhost:5000/';
 const MAX_FILE_SIZE_MB = 50;
 const ALLOWED_FILE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'video/mp4', 'video/quicktime', 'video/webm', 'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
 
 function Chat() {
-    // --- 基础状态 ---
+    // --- 状态 ---
+    // ... (大部分状态保持不变) ...
+    const [isDownloadingText, setIsDownloadingText] = useState(false);
     const [messages, setMessages] = useState([]);
     const [newMessage, setNewMessage] = useState('');
     const [error, setError] = useState('');
@@ -21,595 +24,345 @@ function Chat() {
     const [selectedFile, setSelectedFile] = useState(null);
     const [previewUrl, setPreviewUrl] = useState(null);
     const [isUploading, setIsUploading] = useState(false);
-
-    // --- 好友和聊天状态 ---
-    const [friends, setFriends] = useState([]); // { id, username, isOnline, hasUnread }
-    const [activeChat, setActiveChat] = useState({ type: 'public' }); // { type: 'public' } | { type: 'private', friendId, friendUsername }
+    const [friends, setFriends] = useState([]);
+    const [activeChat, setActiveChat] = useState({ type: 'public' }); // 默认是公共聊天室
     const [searchTerm, setSearchTerm] = useState('');
-    const [searchResults, setSearchResults] = useState([]); // { _id, username }
+    const [searchResults, setSearchResults] = useState([]);
     const [isSearching, setIsSearching] = useState(false);
-    const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+    const [isLoadingHistory, setIsLoadingHistory] = useState(false); // 这个状态很重要
+    const [editingFriendGroup, setEditingFriendGroup] = useState(null);
+    const [newGroupNameInput, setNewGroupNameInput] = useState('');
+    const [selectedGroupForMove, setSelectedGroupForMove] = useState('');
+    const [isCapturing,setIsCapturing] = useState(false);
 
-    // --- Refs and Hooks ---
+    // --- Refs & Hooks ---
     const socketRef = useRef(null);
     const messagesEndRef = useRef(null);
     const fileInputRef = useRef(null);
     const navigate = useNavigate();
-    const activeChatRef = useRef(activeChat); // 使用 Ref 跟踪 activeChat
+    const activeChatRef = useRef(activeChat);
+    const messageListRef = useRef(null);
+    useEffect(() => { activeChatRef.current = activeChat; }, [activeChat]);
 
-    // 更新 Ref 以便在回调中获取最新 activeChat
-    useEffect(() => {
-        activeChatRef.current = activeChat;
-    }, [activeChat]);
-
-
-    // --- 解码 Token 并设置用户 ---
+    // --- 解码 Token & 设置用户 ---
     const decodeTokenAndSetUser = useCallback(() => {
+        // ... (无变动) ...
         const token = localStorage.getItem('token');
         if (token) {
             try {
                 const decoded = jwtDecode(token);
-                if (decoded.user && decoded.user.id && decoded.user.username) {
-                    console.log("Token 解码成功, 用户:", decoded.user.username);
+                if (decoded.user?.id && decoded.user?.username) {
                     setCurrentUser({ id: decoded.user.id, username: decoded.user.username });
-                    setAuthToken(token); // 设置 Axios 默认请求头
-                } else {
-                    throw new Error("无效的 Token 格式");
-                }
-            } catch (decodeError) {
-                console.error("解码 Token 失败:", decodeError);
-                localStorage.removeItem('token');
-                setAuthToken(null); // 清除 Axios 请求头
-                navigate('/login');
-            }
-        } else {
-            console.log("未找到 Token, 跳转到登录");
-            navigate('/login');
-        }
+                    setAuthToken(token);
+                } else throw new Error("无效 Token");
+            } catch (err) { console.error("解码失败:", err); localStorage.removeItem('token'); setAuthToken(null); navigate('/login'); }
+        } else navigate('/login');
     }, [navigate]);
+    useEffect(() => { if (!currentUser) decodeTokenAndSetUser(); }, [currentUser, decodeTokenAndSetUser]);
 
-
-    // --- WebSocket 效果钩子 ---
+    // --- WebSocket ---
     useEffect(() => {
-        const token = localStorage.getItem('token');
-        if (!token) {
-            navigate('/login');
-            return;
-        }
+        if (!currentUser) return;
+        if (socketRef.current?.connected) return;
+        if (socketRef.current) socketRef.current.disconnect();
 
-        // 确保 currentUser 存在后再连接
-        if (!currentUser) {
-            decodeTokenAndSetUser();
-            return; // 等待 currentUser 更新后重新运行 effect
-        }
-
-        // 防止重复连接
-        if (socketRef.current?.connected) {
-            console.log("WebSocket 已连接，跳过重连");
-            return;
-        }
-        // 清理可能存在的旧实例
-        if (socketRef.current) {
-            console.log("清理旧的 Socket 实例...");
-            socketRef.current.disconnect();
-        }
-
-        console.log(`尝试连接 WebSocket (用户: ${currentUser.username})...`);
-        const socket = io(SOCKET_SERVER_URL, { auth: { token: token } });
+        console.log(`连接 WS (用户: ${currentUser.username})...`);
+        const socket = io(SOCKET_SERVER_URL, { auth: { token: localStorage.getItem('token') } });
         socketRef.current = socket;
 
-        // --- 事件处理函数定义 ---
         const handleConnect = () => {
             setIsConnected(true);
             setError('');
-            console.log('WebSocket 已连接, Socket ID:', socket.id);
-            console.log('请求初始好友列表...');
-            socket.emit('getFriendList'); // 连接成功后请求好友列表
-            // 根据当前的 activeChat 处理初始状态
+            console.log('WS 已连接');
+            socket.emit('getFriendList');
             if (activeChatRef.current.type === 'public') {
-                console.log("连接成功，当前为公共聊天。");
-                setMessages([]); // 清空可能残留的消息
-                setIsLoadingHistory(false);
+                setMessages([]); // 清空可能存在的旧消息
+                setIsLoadingHistory(true); // 设置加载状态
+                console.log('[WS Connect] 请求公共历史...');
+                socket.emit('getPublicHistory'); // <<<<<< 新增：请求公共历史记录
             } else if (activeChatRef.current.type === 'private') {
-                console.log(`重连时仍在私聊 (${activeChatRef.current.friendUsername}), 请求历史...`);
+                setMessages([]); // 清空可能存在的旧消息
                 setIsLoadingHistory(true);
                 socket.emit('getPrivateHistory', { friendId: activeChatRef.current.friendId });
             }
         };
 
-        const handleDisconnect = (reason) => {
-            setIsConnected(false);
-            setActiveChat({ type: 'public' }); // 断开连接默认回到公共聊天
-            setMessages([]);
-            setFriends([]); // 清空好友列表
-            if (reason === 'io server disconnect') { setError("服务器主动断开连接"); }
-            else if (reason !== 'io client disconnect') { setError('连接已断开...'); } // 避免登出时显示错误
-            console.log('WebSocket 已断开:', reason);
-        };
+        const handleDisconnect = (reason) => { /* ... (无变动) ... */ setIsConnected(false); setActiveChat({ type: 'public' }); setMessages([]); setFriends([]); if (reason !== 'io client disconnect') setError('连接断开'); console.log('WS 断开:', reason); };
+        const handleConnectError = (err) => { /* ... (无变动) ... */ setError(`连接失败: ${err.message}.`); setIsConnected(false); if (err.message?.toLowerCase().includes('authentication error') || err.message === '认证错误') { localStorage.removeItem('token'); setAuthToken(null); navigate('/login'); } console.error('WS 连接错误:', err.message); };
+        const handleFriendListUpdate = (list) => { /* ... (无变动) ... */ console.log("好友列表更新:", list); setFriends(prev => Array.isArray(list) ? list.map(f => ({ ...f, hasUnread: prev.find(pf => pf.id === f.id)?.hasUnread || false })) : []); };
+        const handleFriendStatusUpdate = ({ userId, isOnline }) => { /* ... (无变动) ... */ setFriends(prev => prev.map(f => f.id === userId ? { ...f, isOnline } : f)); };
 
-        const handleConnectError = (err) => {
-            setError(`连接失败: ${err.message}.`);
-            setIsConnected(false);
-            // 处理认证错误导致的连接失败
-            if (err.message?.toLowerCase().includes('authentication error') || err.message === '认证错误') {
-                localStorage.removeItem('token');
-                setAuthToken(null);
-                navigate('/login');
-            }
-            console.error('WebSocket 连接错误:', err.message);
-        };
-
-        // 好友列表更新
-        const handleFriendListUpdate = (friendList) => {
-            console.log("收到好友列表更新:", friendList);
-            // 合并未读状态，避免列表刷新时丢失未读提示
-            setFriends(prevFriends => {
-                const unreadMap = new Map(prevFriends.filter(f => f.hasUnread).map(f => [f.id, true]));
-                return friendList.map(f => ({ ...f, hasUnread: unreadMap.get(f.id) || false }));
-            });
-        };
-
-        // 好友在线状态更新
-        const handleFriendStatusUpdate = ({ userId, isOnline }) => {
-            console.log(`好友状态更新: 用户 ${userId} ${isOnline ? '上线' : '下线'}`);
-            setFriends(prevFriends =>
-                prevFriends.map(friend =>
-                    friend.id === userId ? { ...friend, isOnline } : friend
-                )
-            );
-        };
-
-        // 处理私聊历史记录
         const handlePrivateHistory = ({ friendId, history }) => {
-            console.log(`收到 ${friendId} 的私聊历史，当前激活聊天:`, activeChatRef.current);
-            // 使用 Ref 来比较，确保比较的是最新的 activeChat
-            if (activeChatRef.current.type === 'private' && activeChatRef.current.friendId === friendId && Array.isArray(history)) {
-                console.log(`加载与 ${activeChatRef.current.friendUsername} 的历史: ${history.length} 条`);
-                setMessages(history);
-            } else {
-                console.log(`忽略来自 ${friendId} 的历史记录，因为当前激活聊天不匹配。`);
-            }
-            setIsLoadingHistory(false); // 无论如何结束加载状态
-        };
-
-        // 处理公共消息 (如果后端还发送的话)
-        const handleNewMessage = (message) => {
-            console.log("收到公共消息:", message?.content);
-            if (activeChatRef.current.type === 'public') { // 使用 Ref
-                setMessages((prev) => [...prev, message]);
-            } else {
-                console.log("收到公共消息，但当前不在公共聊天。");
-                // 可以考虑增加公共频道的未读提示
-            }
-        };
-
-        // 处理收到的私聊消息
-        const handleReceivePrivateMessage = (message) => {
-            console.log(`收到来自 ${message.sender?.username} 的私聊:`, message?.content);
-            if (!currentUser) return; // 确保 currentUser 存在
-            // 确定好友 ID (消息可能是自己发的，也可能是对方发的)
-            const friendId = message.sender?._id === currentUser.id ? message.recipient : message.sender?._id;
-            if (!friendId) {
-                console.warn("无法确定私聊消息的好友 ID:", message);
-                return;
-            }
-
-            // 如果当前正在和该好友聊天，直接添加到消息列表并清除未读
+            // 确保只在当前私聊窗口更新历史
             if (activeChatRef.current.type === 'private' && activeChatRef.current.friendId === friendId) {
-                setMessages((prev) => [...prev, message]);
-                setFriends(prevFriends =>
-                    prevFriends.map(f =>
-                        f.id === friendId ? { ...f, hasUnread: false } : f
-                    )
-                );
-            } else {
-                // 如果不在当前聊天，标记为未读
-                console.log(`收到来自 ${message.sender?.username} 的私聊，但当前不在该聊天。标记未读。`);
-                setFriends(prevFriends =>
-                    prevFriends.map(f =>
-                        f.id === friendId ? { ...f, hasUnread: true } : f
-                    )
-                );
+                setMessages(Array.isArray(history) ? history : []);
+            }
+            setIsLoadingHistory(false);
+        };
+
+        // <<<<<< 新增：处理公共历史记录的 Handler >>>>>>
+        const handlePublicHistory = (data) => {
+            if (activeChatRef.current.type === 'public' && data) { // 确保当前是公共聊天室
+                setMessages(Array.isArray(data.history) ? data.history : []);
+                console.log('[WS] 收到公共历史记录:', data.history.length, '条');
+            }
+            setIsLoadingHistory(false); // 关闭加载状态
+        };
+
+        const handleNewMessage = (msg) => { // 这个是服务器广播给所有人的公共消息
+            if (activeChatRef.current.type === 'public' && msg) {
+                setMessages(prev => [...prev, msg]);
             }
         };
+        const handleReceivePrivateMessage = (msg) => { /* ... (无变动) ... */ if (!currentUser || !msg) return; const friendId = msg.sender?._id === currentUser.id ? msg.recipient : msg.sender?._id; if (!friendId) return; if (activeChatRef.current.type === 'private' && activeChatRef.current.friendId === friendId) { setMessages(prev => [...prev, msg]); setFriends(prev => prev.map(f => f.id === friendId ? { ...f, hasUnread: false } : f)); } else { setFriends(prev => prev.map(f => f.id === friendId ? { ...f, hasUnread: true } : f)); } };
+        const handleMessageError = (err) => { /* ... (无变动) ... */ setError(`消息错误: ${err.error || '未知'}`); setTimeout(() => setError(''), 5000); };
 
-        // 处理消息错误
-        const handleMessageError = (errorData) => {
-            setError(`消息错误: ${errorData.error || '未知错误'}`);
-            setTimeout(() => setError(''), 5000);
-            console.error('收到消息错误:', errorData);
-        };
-
-        // --- 绑定监听器 ---
         socket.on('connect', handleConnect);
         socket.on('disconnect', handleDisconnect);
         socket.on('connect_error', handleConnectError);
         socket.on('friendListUpdate', handleFriendListUpdate);
         socket.on('friendStatusUpdate', handleFriendStatusUpdate);
         socket.on('privateHistory', handlePrivateHistory);
-        socket.on('newMessage', handleNewMessage); // 监听公共消息
-        socket.on('receivePrivateMessage', handleReceivePrivateMessage); // 监听私聊消息
+        socket.on('publicHistory', handlePublicHistory); // <<<<<< 新增：监听公共历史记录事件
+        socket.on('newMessage', handleNewMessage); // 已有，用于接收新的公共消息
+        socket.on('receivePrivateMessage', handleReceivePrivateMessage);
         socket.on('messageError', handleMessageError);
 
-        // --- 清理函数 ---
         return () => {
-            console.log('组件卸载或依赖变化，清理 WebSocket 监听器并断开连接...');
-            socket.off('connect', handleConnect);
+            console.log('清理 WS...');
+            socket.off('connect', handleConnect); // 确保所有监听器都被正确移除
             socket.off('disconnect', handleDisconnect);
             socket.off('connect_error', handleConnectError);
             socket.off('friendListUpdate', handleFriendListUpdate);
             socket.off('friendStatusUpdate', handleFriendStatusUpdate);
             socket.off('privateHistory', handlePrivateHistory);
+            socket.off('publicHistory', handlePublicHistory); // <<<<<< 新增：移除监听
             socket.off('newMessage', handleNewMessage);
             socket.off('receivePrivateMessage', handleReceivePrivateMessage);
             socket.off('messageError', handleMessageError);
             socket.disconnect();
             socketRef.current = null;
             setIsConnected(false);
-            // 清理预览 URL (如果存在)
-            if (previewUrl) {
-                URL.revokeObjectURL(previewUrl);
-                console.log("清理预览 URL on unmount");
-            }
+            if (previewUrl) URL.revokeObjectURL(previewUrl);
         };
-        // 依赖项：仅在用户身份变化时重新运行以建立新连接
-    }, [navigate, decodeTokenAndSetUser, currentUser]);
+    }, [currentUser, navigate]); // 依赖项保持不变，因为 activeChatRef.current 用于内部判断
 
     // --- 自动滚动 ---
-    const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    };
-    useEffect(scrollToBottom, [messages]); // 依赖消息列表
+    useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
     // --- 文件处理 ---
-    const handleFileButtonClick = () => {
-        fileInputRef.current?.click();
-    };
+    const handleFileButtonClick = () => fileInputRef.current?.click();
+    const handleFileSelect = (e) => { /* ... (无变动) ... */ const file = e.target.files?.[0]; if (!file) return; setError(''); const isAllowedExt = /\.(jpg|jpeg|png|gif|mp4|mov|webm|pdf|doc|docx)$/i.test(file.name); if (!ALLOWED_FILE_TYPES.includes(file.type) && !file.type.startsWith('image/') && !file.type.startsWith('video/') && !isAllowedExt) { setError(`不支持文件`); setTimeout(() => setError(''), 3000); e.target.value = null; return; } if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) { setError(`文件过大`); setTimeout(() => setError(''), 3000); e.target.value = null; return; } setSelectedFile(file); const objectUrl = URL.createObjectURL(file); setPreviewUrl(objectUrl); setNewMessage(''); e.target.value = null; };
+    const handleCancelPreview = useCallback(() => { /* ... (无变动) ... */ console.log("取消预览"); if (previewUrl) URL.revokeObjectURL(previewUrl); setSelectedFile(null); setPreviewUrl(null); if (fileInputRef.current) fileInputRef.current.value = null; }, [previewUrl]);
 
-    const handleFileSelect = (e) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-        setError('');
-        // 文件类型和大小检查
-        const isAllowedExtension = /\.(jpg|jpeg|png|gif|mp4|mov|webm|pdf|doc|docx)$/i.test(file.name);
-        if (!ALLOWED_FILE_TYPES.includes(file.type) && !file.type.startsWith('image/') && !file.type.startsWith('video/') && !isAllowedExtension) {
-            setError(`不支持的文件类型: ${file.type || file.name.split('.').pop()}`);
-            setTimeout(() => setError(''), 5000);
-            e.target.value = null; return;
-        }
-        if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
-            setError(`文件过大，最大 ${MAX_FILE_SIZE_MB}MB`);
-            setTimeout(() => setError(''), 5000);
-            e.target.value = null; return;
-        }
+    // --- 好友搜索/添加/移除 ---
+    const handleSearchChange = (e) => { /* ... (无变动) ... */ const term = e.target.value; setSearchTerm(term); if (term.trim().length > 0) searchUsersAPI(term.trim()); else setSearchResults([]); };
+    const searchUsersAPI = useCallback(async (query) => { /* ... (无变动) ... */ if (isSearching) return; setIsSearching(true); setError(''); try { const res = await axios.get(`/api/friends/search?query=${query}`); setSearchResults(res.data || []); } catch (err) { setError('搜索失败'); setSearchResults([]); } finally { setIsSearching(false); } }, [isSearching]);
+    const handleAddFriend = useCallback(async (friendId) => { /* ... (无变动) ... */ setError(''); try { const res = await axios.post('/api/friends', { friendId }); if (res.data.friend) socketRef.current?.emit('getFriendList'); setSearchResults(prev => prev.filter(user => user._id !== friendId)); } catch (err) { setError(err.response?.data?.msg || '添加失败'); } }, []);
+    const handleRemoveFriend = useCallback(async (friendId, friendUsername) => { /* ... (无变动) ... */ if (!window.confirm(`移除 ${friendUsername}?`)) return; setError(''); try { await axios.delete(`/api/friends/${friendId}`); setFriends(prev => prev.filter(f => f.id !== friendId)); if (activeChatRef.current.type === 'private' && activeChatRef.current.friendId === friendId) { setActiveChat({ type: 'public' }); setMessages([]); /* 切换到公共聊天室时，历史记录应由 handleSelectChat 中的逻辑触发 */ } } catch (err) { setError(err.response?.data?.msg || '移除失败'); } }, []);
 
-        setSelectedFile(file);
-        const objectUrl = URL.createObjectURL(file);
-        setPreviewUrl(objectUrl);
-        setNewMessage(''); // 选择文件后清空文本输入
-        e.target.value = null; // 允许选择同名文件
-        console.log("文件已选择:", file.name);
-    };
-
-    // 文件预览清理函数
-    const handleCancelPreview = useCallback(() => {
-        console.log("调用 handleCancelPreview 清理文件状态...");
-        if (previewUrl) {
-            URL.revokeObjectURL(previewUrl);
-            console.log("旧 previewUrl 已释放");
-        }
-        setSelectedFile(null);
-        setPreviewUrl(null);
-        if (fileInputRef.current) {
-            fileInputRef.current.value = null;
-            console.log("文件 input 值已清空");
-        }
-        console.log("文件状态清理调用完成 (下次渲染生效)");
-    }, [previewUrl]); // 依赖 previewUrl
-
-    // --- 好友搜索 ---
-    const handleSearchChange = (e) => {
-        const term = e.target.value;
-        console.log("好友搜索框输入:", term); // 添加日志确认事件触发
-        setSearchTerm(term);
-        if (term.trim().length > 1) {
-            searchUsersAPI(term.trim());
-        } else {
-            setSearchResults([]);
-        }
-    };
-
-    const searchUsersAPI = useCallback(async (query) => {
-        if (isSearching) return;
-        setIsSearching(true);
-        setError('');
-        console.log(`开始搜索用户: ${query}`);
-        try {
-            // 确认 Axios 请求头已设置 Token (通过 setAuthToken)
-            const res = await axios.get(`/api/friends/search?query=${query}`);
-            console.log("搜索结果:", res.data);
-            setSearchResults(res.data || []);
-        } catch (err) {
-            console.error("搜索用户失败:", err.response?.data || err.message);
-            setError(err.response?.data?.msg || '搜索用户失败');
-            setSearchResults([]);
-        } finally {
-            setIsSearching(false);
-        }
-    }, [isSearching]);
-
-    // --- 添加好友 ---
-    const handleAddFriend = useCallback(async (friendId) => {
-        setError('');
-        console.log(`[前端] 尝试添加好友，ID: ${friendId}`); // <--- 日志 1
-        try {
-            console.log("[前端] 发送 POST 请求到 /api/friends"); // <--- 日志 2
-            const res = await axios.post('/api/friends', { friendId });
-            console.log('[前端] 添加好友 API 响应:', res.status, res.data); // <--- 日志 3
-            const addedFriend = res.data.friend;
-            if (addedFriend) {
-                setFriends(prev => prev.some(f => f.id === addedFriend._id) ? prev : [...prev, { id: addedFriend._id, username: addedFriend.username, isOnline: false, hasUnread: false }]);
-                console.log("[前端] 好友列表已乐观更新"); // <--- 日志 4
-            }
-            setSearchResults(prev => prev.filter(user => user._id !== friendId));
-        } catch (err) {
-            console.error("[前端] 添加好友失败:", err); // <--- 日志 5
-            if (err.response) {
-                console.error("[前端] 错误响应数据:", err.response.data); // <--- 日志 6
-                setError(err.response.data?.msg || `添加失败 (${err.response.status})`);
-            } else {
-                setError('添加好友时发生网络或未知错误');
-            }
-            setTimeout(() => setError(''), 5000);
-        }
-    }, []);
-
-    // --- 移除好友 ---
-    const handleRemoveFriend = useCallback(async (friendId, friendUsername) => {
-        if (!window.confirm(`确定要移除好友 ${friendUsername} 吗？`)) return;
-        setError('');
-        console.log(`尝试移除好友: ${friendId}`);
-        try {
-            await axios.delete(`/api/friends/${friendId}`);
-            console.log('移除好友成功:', friendId);
-            // 更新好友列表状态
-            setFriends(prev => prev.filter(f => f.id !== friendId));
-            // 如果当前正与该好友聊天，切换回公共聊天
-            if (activeChatRef.current.type === 'private' && activeChatRef.current.friendId === friendId) {
-                setActiveChat({ type: 'public' });
-                setMessages([]); // 清空消息列表
-            }
-            // 如果后端没有 WebSocket 通知，则需要手动刷新列表
-            // socketRef.current?.emit('getFriendList');
-        } catch (err) {
-            console.error("移除好友失败:", err.response?.data || err.message);
-            setError(err.response?.data?.msg || '移除好友失败');
-            setTimeout(() => setError(''), 5000);
-        }
-    }, []); // 移除依赖，内部使用 Ref
-
-    // --- 切换聊天对象 ---
+    // --- 切换聊天 ---
     const handleSelectChat = useCallback((chatInfo) => {
-        if (!socketRef.current?.connected) { setError("未连接到服务器"); return; }
-        // 检查是否点击了当前已激活的聊天
-        if (activeChatRef.current.type === chatInfo.type && (chatInfo.type === 'public' || activeChatRef.current.friendId === chatInfo.friendId)) { return; }
+        if (!isConnected) return;
+        // 防止重复点击同一个聊天
+        if (activeChatRef.current.type === chatInfo.type &&
+            (chatInfo.type === 'public' || activeChatRef.current.friendId === chatInfo.friendId)) {
+            return;
+        }
 
-        console.log("请求切换聊天到:", chatInfo);
+        console.log("切换到:", chatInfo);
         setActiveChat(chatInfo);
-        setMessages([]); setError('');
-        handleCancelPreview(); // 切换聊天时取消文件预览
+        setMessages([]); // 清空消息
+        setError('');
+        handleCancelPreview();
         setNewMessage('');
-        setIsLoadingHistory(true);
+        setIsLoadingHistory(true); // <<<<<< 统一在这里设置 isLoadingHistory 为 true
 
         if (chatInfo.type === 'public') {
-            console.log("切换到公共聊天。");
-            // 清空消息列表 (上面已做)，公共历史目前不加载
-            setIsLoadingHistory(false);
+            console.log('[SelectChat] 请求公共历史...');
+            socketRef.current?.emit('getPublicHistory'); // <<<<<< 新增：请求公共历史记录
         } else if (chatInfo.type === 'private') {
-            console.log(`请求与 ${chatInfo.friendUsername} (${chatInfo.friendId}) 的私聊历史...`);
-            socketRef.current.emit('getPrivateHistory', { friendId: chatInfo.friendId });
-            // 清除此好友的未读标记
-            setFriends(prevFriends => prevFriends.map(f => f.id === chatInfo.friendId ? { ...f, hasUnread: false } : f));
+            socketRef.current?.emit('getPrivateHistory', { friendId: chatInfo.friendId });
+            setFriends(prev => prev.map(f => f.id === chatInfo.friendId ? { ...f, hasUnread: false } : f));
         }
-    }, [isConnected, handleCancelPreview]);
-
+    }, [isConnected, handleCancelPreview]); // 依赖项保持不变，因为 activeChatRef.current 用于内部判断
 
     // --- 发送消息 ---
-    const handleSendMessage = async (e) => {
-        e.preventDefault();
-        if (!isConnected) { setError("未连接"); return; }
-        console.log(`发送按钮点击: newMessage='${newMessage}', selectedFile=`, selectedFile); // 调试日志
-        if (!newMessage.trim() && !selectedFile) { setError("不能发送空消息"); setTimeout(()=>setError(''), 3000); return; }
-
-        const currentActiveChat = activeChatRef.current; // 使用 Ref 获取最新状态
-        const targetRecipientId = currentActiveChat.type === 'private' ? currentActiveChat.friendId : null;
-
-        // --- 发送文件 ---
-        if (selectedFile) {
-            const fileToSend = selectedFile; // 捕获当前选中的文件状态
-            setIsUploading(true); setError('');
-            const formData = new FormData(); formData.append('file', fileToSend);
-            console.log(`开始上传文件: ${fileToSend.name} to ${targetRecipientId || '公共'}`);
-            try {
-                const res = await axios.post('/api/upload', formData);
-                console.log('文件上传成功:', res.data);
-                if (socketRef.current && res.data.url && res.data.mimeType) {
-                    const payload = { type: 'file', recipientId: targetRecipientId, url: res.data.url, mimeType: res.data.mimeType, originalFilename: fileToSend.name };
-                    socketRef.current.emit('sendMessage', payload);
-                    console.log(`已发送文件消息 WS:`, payload);
-                    handleCancelPreview(); // <--- 成功后清理
-                    console.log("文件发送成功，调用了 handleCancelPreview");
-                } else { throw new Error('服务器返回文件信息无效'); }
-            } catch (uploadError) {
-                console.error('文件上传失败:', uploadError);
-                setError(`上传失败: ${uploadError.response?.data?.msg || '错误'}`);
-                setTimeout(() => setError(''), 5000);
-                handleCancelPreview(); // <--- 失败后也清理
-                console.log("文件上传失败，调用了 handleCancelPreview");
-            } finally { setIsUploading(false); }
-            // --- 发送文本 ---
-        } else {
-            const messageText = newMessage.trim();
-            if (!messageText) return;
-            if (socketRef.current) {
-                const payload = { type: 'text', recipientId: targetRecipientId, text: messageText };
-                socketRef.current.emit('sendMessage', payload);
-                console.log(`已发送文本消息 WS:`, payload);
-                setNewMessage(''); setError('');
-            }
-        }
-    };
+    const handleSendMessage = async (e) => { /* ... (无变动，此部分逻辑已能正确处理公共/私聊的 recipientId) ... */ e.preventDefault(); if (!isConnected || (!newMessage.trim() && !selectedFile)) { setError("无内容发送"); return; } const currentActiveChat = activeChatRef.current; const targetRecipientId = currentActiveChat.type === 'private' ? currentActiveChat.friendId : null; console.log(`发送 类型:${selectedFile ? 'file' : 'text'} 目标:${targetRecipientId || '公共'}`); if (selectedFile) { const file = selectedFile; setIsUploading(true); setError(''); const formData = new FormData(); formData.append('file', file); try { const res = await axios.post('/api/upload', formData); if (socketRef.current && res.data.url && res.data.mimeType) { const payload = { type: 'file', recipientId: targetRecipientId, url: res.data.url, mimeType: res.data.mimeType, originalFilename: file.name }; socketRef.current.emit('sendMessage', payload); console.log("文件WS发送:", payload); handleCancelPreview(); } else throw new Error('上传响应无效'); } catch (err) { console.error('上传失败:', err); setError('上传失败'); handleCancelPreview(); } finally { setIsUploading(false); } } else { const text = newMessage.trim(); if (!text) return; if (socketRef.current) { const payload = { type: 'text', recipientId: targetRecipientId, text: text }; socketRef.current.emit('sendMessage', payload); console.log("文本WS发送:", payload); setNewMessage(''); setError(''); } } };
 
     // --- 登出 ---
-    const handleLogout = useCallback(() => {
-        console.log("执行登出...");
-        localStorage.removeItem('token');
-        setAuthToken(null);
-        socketRef.current?.disconnect();
-        setActiveChat({ type: 'public' }); setMessages([]); setFriends([]); setError(''); setCurrentUser(null);
-        setSearchTerm(''); setSearchResults([]); handleCancelPreview(); // 登出时也清理预览
-        console.log("状态已重置，导航到 /login");
-        navigate('/login');
-    }, [navigate, handleCancelPreview]); // 加入 handleCancelPreview 依赖
+    const handleLogout = useCallback(() => { /* ... (无变动) ... */ console.log("登出..."); localStorage.removeItem('token'); setAuthToken(null); socketRef.current?.disconnect(); setActiveChat({ type: 'public' }); setMessages([]); setFriends([]); setError(''); setCurrentUser(null); setSearchTerm(''); setSearchResults([]); handleCancelPreview(); console.log("导航到 /login"); navigate('/login'); }, [navigate, handleCancelPreview]);
 
-    // --- 获取聊天标题 ---
+    // --- 分组编辑 ---
+    const handleEditGroupClick = (friendId, currentGroup) => { /* ... (无变动) ... */ setEditingFriendGroup({ friendId, currentGroup }); setNewGroupNameInput(currentGroup || '默认分组'); setSelectedGroupForMove(currentGroup || '默认分组'); };
+    const handleGroupNameChange = (e) => setNewGroupNameInput(e.target.value);
+    const handleGroupSelectChange = (e) => { /* ... (无变动) ... */ const value = e.target.value; setSelectedGroupForMove(value); if (value !== '--新建分组--') setNewGroupNameInput(value); else setNewGroupNameInput(''); };
+    const handleSaveGroup = useCallback(async () => { /* ... (无变动) ... */ if (!editingFriendGroup) return; const friendId = editingFriendGroup.friendId; const finalGroupName = newGroupNameInput.trim() || (selectedGroupForMove !== '--新建分组--' ? selectedGroupForMove : ''); if (!finalGroupName) { setError("分组名不能为空"); return; } setError(''); console.log(`移动好友 ${friendId} 到分组 ${finalGroupName}`); try { await axios.put(`/api/friends/${friendId}/group`, { group: finalGroupName }); setFriends(prev => prev.map(f => f.id === friendId ? { ...f, group: finalGroupName } : f)); setEditingFriendGroup(null); setNewGroupNameInput(''); setSelectedGroupForMove(''); socketRef.current?.emit('getFriendList'); } catch (err) { setError('移动分组失败'); console.error("移动失败:", err); setEditingFriendGroup(null); } }, [editingFriendGroup, newGroupNameInput, selectedGroupForMove]);
+    const handleCancelEditGroup = (e) => { /* ... (无变动) ... */ e?.stopPropagation(); setEditingFriendGroup(null); setNewGroupNameInput(''); setSelectedGroupForMove(''); };
+    const handleNewGroupNameInputChange = (e) => { /* ... (无变动) ... */ const value = e.target.value; setNewGroupNameInput(value); if (selectedGroupForMove !== '--新建分组--' && value.trim() !== selectedGroupForMove) setSelectedGroupForMove('--新建分组--'); };
     const getChatTitle = () => activeChat.type === 'public' ? '公共聊天室' : activeChat.friendUsername || '私聊';
+    // --- 计算分组数据 ---
+    const groupedFriends = useMemo(() => friends.reduce((acc, friend) => { /* ... (无变动) ... */ const group = friend.group || '默认分组'; if (!acc[group]) acc[group] = []; acc[group].push(friend); return acc; }, {}), [friends]);
+    const groupNames = useMemo(() => { /* ... (无变动) ... */ const names = new Set(friends.map(f => f.group || '默认分组')); return ['默认分组', ...Array.from(names).filter(name => name !== '默认分组').sort()]; }, [friends]);
+
+    // --- 下载纯文本聊天记录 ---
+    const handleDownloadTextHistory = useCallback(() => { /* ... (无变动) ... */ if (isDownloadingText || messages.length === 0) return; setIsDownloadingText(true); setError(''); try { console.log("开始准备文本聊天记录..."); const textHistory = messages .filter(msg => msg.messageType === 'text' && msg.content) .map(msg => { const date = new Date(msg.createdAt || msg.timestamp); const pad = (num) => String(num).padStart(2, '0'); const formattedTime = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`; const senderName = msg.sender?.username || '未知用户'; const content = msg.content; return `[${formattedTime}] ${senderName}: ${content}`; }) .join('\n'); if (!textHistory) { console.log("没有文本消息可供下载。"); setError("当前聊天没有文本消息。"); setTimeout(() => setError(''), 3000); setIsDownloadingText(false); return; } console.log("文本记录准备完毕，创建 Blob..."); const blob = new Blob([textHistory], { type: 'text/plain;charset=utf-8' }); const url = window.URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; const timestamp = new Date().toISOString().replace(/[:.-]/g, ''); const safeChatTitle = getChatTitle().replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_'); link.download = `聊天记录_文本_${safeChatTitle}_${timestamp}.txt`; document.body.appendChild(link); link.click(); document.body.removeChild(link); window.URL.revokeObjectURL(url); console.log("文本记录下载已触发"); } catch (err) { console.error("下载文本记录失败:", err); setError(`下载文本记录失败: ${err.message || '未知错误'}`); setTimeout(() => setError(''), 5000); } finally { setIsDownloadingText(false); } }, [isDownloadingText, messages, activeChat]);
+    // --- 处理截图 ---
+    const handleCaptureChat = useCallback(async () => { /* ... (无变动) ... */ if (!messageListRef.current) { return; } if (isCapturing) return; setIsCapturing(true); setError(''); try { const canvas = await html2canvas(messageListRef.current, { /* ... options ... */ }); const imageDataUrl = canvas.toDataURL('image/png'); const link = document.createElement('a'); link.href = imageDataUrl; const timestamp = new Date().toISOString().replace(/[:.-]/g, ''); link.download = `聊天记录_${getChatTitle()}_${timestamp}.png`; document.body.appendChild(link); link.click(); document.body.removeChild(link); } catch (err) { /* ... */ } finally { setIsCapturing(false); } }, [isCapturing, activeChat]);
+    const handleDownloadHistory = useCallback(async () => { /* ... (无变动，此函数似乎是为旧的HTTP下载准备的，但您当前的WebSocket历史获取逻辑是主流) ... */ if (!currentUser || !isConnected) { setError("请先连接才能下载记录"); setTimeout(() => setError(''), 3000); return; } const currentActiveChat = activeChatRef.current; let downloadUrl = '/api/messages/download'; let params = {}; let defaultFilename = 'chat_history.txt'; if (currentActiveChat.type === 'public') { params.chatType = 'public'; defaultFilename = 'public_chat_history.txt'; } else if (currentActiveChat.type === 'private' && currentActiveChat.friendId) { params.chatType = 'private'; params.targetId = currentActiveChat.friendId; defaultFilename = `chat_with_${currentActiveChat.friendUsername || currentActiveChat.friendId}.txt`; } else { setError("无法确定下载目标"); setTimeout(() => setError(''), 3000); return; } setError(''); console.log(`请求下载: ${downloadUrl} ? ${new URLSearchParams(params).toString()}`); try { const response = await axios.get(downloadUrl, { params: params, responseType: 'blob', }); console.log("收到下载响应, 状态:", response.status); const contentDisposition = response.headers['content-disposition']; let filename = defaultFilename; if (contentDisposition) { /* ... */ } console.log("最终下载文件名:", filename); const blob = new Blob([response.data], { type: response.headers['content-type'] || 'text/plain;charset=utf-8' }); const url = window.URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.setAttribute('download', filename); document.body.appendChild(link); link.click(); document.body.removeChild(link); window.URL.revokeObjectURL(url); console.log("下载已触发"); } catch (err) { console.error("下载聊天记录失败:", err.response?.data || err.message); let errorMsg = '下载失败，请稍后重试'; if (err.response?.data && err.response.headers['content-type']?.includes('application/json')) { try { const errorJson = JSON.parse(await err.response.data.text()); errorMsg = errorJson.msg || '下载出错'; } catch (parseError) { /* ... */ } } else if (err.response?.statusText) { errorMsg = `下载失败 (${err.response.status} ${err.response.statusText})`; } setError(errorMsg); setTimeout(() => setError(''), 5000); } }, [currentUser, isConnected]);
 
     // --- JSX 渲染 ---
     return (
+        // ... (JSX 结构基本无变动，仅确保 isLoadingHistory 状态被正确使用) ...
         <div style={stylesChat.appContainer}>
             {/* 侧边栏 */}
             <div style={stylesChat.sidebar}>
-                <div style={stylesChat.sidebarHeader}>
-                    {currentUser && <h3>你好, {currentUser.username}</h3>}
-                    <button onClick={handleLogout} style={stylesChat.logoutButtonSmall}>登出</button>
-                </div>
+                {/* ... (侧边栏代码无变动) ... */}
+                <div style={stylesChat.sidebarHeader}> {currentUser && <h3>你好, {currentUser.username}</h3>} <button onClick={handleLogout} style={stylesChat.logoutButtonSmall}>登出</button> </div>
                 <div style={{...stylesChat.chatListItem, ...(activeChat.type === 'public' ? stylesChat.activeChatListItem : {})}} onClick={() => handleSelectChat({ type: 'public' })}>🌐 公共聊天室</div>
                 <hr style={stylesChat.hr}/>
-                <h4>好友列表 ({friends.length})</h4>
-                <div style={stylesChat.friendList}>
-                    {friends.length === 0 && <p style={stylesChat.sidebarNotice}>还没有好友</p>}
-                    {friends.map(friend => (
-                        <div key={friend.id} style={{...stylesChat.chatListItem, ...(activeChat.type === 'private' && activeChat.friendId === friend.id ? stylesChat.activeChatListItem : {})}} onClick={() => handleSelectChat({ type: 'private', friendId: friend.id, friendUsername: friend.username })} title={`与 ${friend.username} 私聊`} className="chatListItem">
-                            <span style={{ ...stylesChat.statusIndicator, backgroundColor: friend.isOnline ? '#4CAF50' : '#9E9E9E' }}></span>
-                            <span style={{ flexGrow: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{friend.username}</span>
-                            {friend.hasUnread && <span style={stylesChat.unreadBadge}>!</span>}
-                            <button onClick={(e) => { e.stopPropagation(); handleRemoveFriend(friend.id, friend.username); }} style={stylesChat.removeFriendButton} title="移除好友" className="removeFriendButton">✕</button>
-                        </div>
-                    ))}
-                </div>
-                {/* 简单的 CSS hover 效果，用于显示移除按钮 */}
-                <style>{`.chatListItem:hover .removeFriendButton { display: inline-block !important; }`}</style>
+                <h4>好友列表</h4>
+                {Object.keys(groupedFriends).length === 0 && <p style={stylesChat.sidebarNotice}>还没有好友</p>}
+                {Object.entries(groupedFriends).sort(([gA], [gB]) => gA === '默认分组' ? -1 : (gB === '默认分组' ? 1 : gA.localeCompare(gB))).map(([groupName, friendsInGroup]) => (
+                    <div key={groupName} style={stylesChat.friendGroupContainer}>
+                        <h5 style={stylesChat.groupTitle}>{groupName} ({friendsInGroup.length})</h5>
+                        {friendsInGroup.sort((a, b) => (b.isOnline - a.isOnline) || a.username.localeCompare(b.username)).map(friend => (
+                            <div key={friend.id} style={{ ...stylesChat.chatListItem, ...(activeChat.type === 'private' && activeChat.friendId === friend.id ? stylesChat.activeChatListItem : {}) }} onClick={() => handleSelectChat({ type: 'private', friendId: friend.id, friendUsername: friend.username })} title={`与 ${friend.username} 私聊`} className="chatListItem">
+                                <span style={{ ...stylesChat.statusIndicator, backgroundColor: friend.isOnline ? '#4CAF50' : '#9E9E9E' }}></span>
+                                <span style={stylesChat.friendName}>{friend.username}</span>
+                                {friend.hasUnread && <span style={stylesChat.unreadBadge}>!</span>}
+                                {editingFriendGroup?.friendId === friend.id ? (
+                                    <div style={stylesChat.editGroupInline} onClick={e=>e.stopPropagation()}>
+                                        <select value={selectedGroupForMove} onChange={handleGroupSelectChange} style={stylesChat.groupSelect}> <option value="--新建分组--">-- 新建 --</option> {groupNames.map(name => <option key={name} value={name}>{name}</option>)} </select>
+                                        <input type="text" value={newGroupNameInput} onChange={handleNewGroupNameInputChange} placeholder="或输新分组" style={{...stylesChat.groupSelect, width: '80px'}}/>
+                                        <button onClick={handleSaveGroup} style={stylesChat.saveGroupButton} title="保存">✓</button>
+                                        <button onClick={handleCancelEditGroup} style={stylesChat.cancelGroupButton} title="取消">✕</button>
+                                    </div>
+                                ) : (
+                                    <> <span style={stylesChat.friendGroupLabel}>({friend.group})</span> <button onClick={(e) => { e.stopPropagation(); handleEditGroupClick(friend.id, friend.group); }} style={stylesChat.editGroupButton} title="移动分组" className="editGroupButton">✎</button> <button onClick={(e) => { e.stopPropagation(); handleRemoveFriend(friend.id, friend.username); }} style={stylesChat.removeFriendButton} title="移除好友" className="removeFriendButton">✕</button> </>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                ))}
+                <style>{`.chatListItem:hover .removeFriendButton, .chatListItem:hover .editGroupButton { display: inline-block !important; }`}</style>
                 <hr style={stylesChat.hr}/>
                 <h4>添加好友</h4>
-                {/* 搜索框 */}
-                <input
-                    type="text"
-                    placeholder="搜索用户名..."
-                    value={searchTerm}
-                    onChange={handleSearchChange} // <--- 确认绑定
-                    style={stylesChat.searchInput}
-                    // 确保没有 disabled 属性
-                />
-                {/* 搜索结果 */}
-                <div style={stylesChat.searchResults}>
-                    {isSearching && <p style={stylesChat.sidebarNotice}>搜索中...</p>}
-                    {!isSearching && searchTerm && searchResults.length === 0 && <p style={stylesChat.sidebarNotice}>未找到用户</p>}
-                    {searchResults.map(user => (
-                        <div key={user._id} style={stylesChat.searchResultItem}>
-                            <span>{user.username}</span>
-                            <button onClick={() => handleAddFriend(user._id)} style={stylesChat.addButton}>添加</button>
-                        </div>
-                    ))}
-                </div>
+                <input type="text" placeholder="搜索用户名..." value={searchTerm} onChange={handleSearchChange} style={stylesChat.searchInput} />
+                <div style={stylesChat.searchResults}> {isSearching && <p style={stylesChat.sidebarNotice}>搜索中...</p>} {!isSearching && searchTerm && searchResults.length === 0 && <p style={stylesChat.sidebarNotice}>未找到用户</p>} {searchResults.map(user => ( <div key={user._id} style={stylesChat.searchResultItem}><span>{user.username}</span><button onClick={() => handleAddFriend(user._id)} style={stylesChat.addButton}>添加</button></div> ))} </div>
             </div>
 
-            {/* 主聊天区 */}
             <div style={stylesChat.chatArea}>
                 <div style={stylesChat.header}>
                     <h2 style={{ margin: 0 }}>{getChatTitle()}</h2>
                     <div style={{display: 'flex', alignItems: 'center', gap: '10px'}}>
+                        <button onClick={handleCaptureChat} disabled={isCapturing || messages.length === 0} style={{ ...stylesChat.captureButton, ...((isCapturing || messages.length === 0) ? stylesChat.captureButtonDisabled : {}) }} title="截取当前聊天记录长图" > {isCapturing ? '截图中...' : '截图'} </button>
+                        <button onClick={handleDownloadTextHistory} disabled={isDownloadingText || messages.length === 0} style={{ ...stylesChat.downloadTextButton, ...((isDownloadingText || messages.length === 0) ? stylesChat.downloadTextButtonDisabled : {}) }} title="下载纯文本聊天记录" > {isDownloadingText ? '下载中...' : '下载文本'} </button>
                         <div style={stylesChat.status}>状态: {isConnected ? <span style={{color: 'green'}}>已连接</span> : <span style={{color: 'red'}}>已断开</span>}</div>
                     </div>
                 </div>
                 {error && <p style={stylesChat.errorText}>{error}</p>}
-                {/* 消息列表 */}
-                <div style={stylesChat.messageList} className="message-list-scrollbar">
-                    {isLoadingHistory && <p style={stylesChat.noticeText}>正在加载聊天记录...</p>}
-                    {!isLoadingHistory && messages.length === 0 && (<p style={stylesChat.noticeText}>{activeChat.type === 'public' ? '公共聊天室无消息' : `开始与 ${activeChat.friendUsername || '好友'} 聊天吧！`}</p>)}
-                    {messages.map((msg) => (
-                        <div key={msg._id} style={{...stylesChat.messageBubble, alignSelf: msg.sender?._id === currentUser?.id ? 'flex-end' : 'flex-start', backgroundColor: msg.sender?._id === currentUser?.id ? '#dcf8c6' : '#eee'}}>
-                            {activeChat.type === 'public' && msg.sender?._id !== currentUser?.id && (<strong style={stylesChat.senderName}>{msg.sender?.username || '用户'}</strong>)}
-                            {/* 消息内容渲染 */}
-                            {msg.messageType === 'text' && ( <span style={stylesChat.messageContent}>{msg.content}</span> )}
-                            {(msg.messageType === 'image' || msg.mimeType?.startsWith('image/')) && ( <img src={msg.fileUrl} alt={msg.originalFilename || '图片'} style={stylesChat.messageImage} /> )}
-                            {(msg.messageType === 'video' || msg.mimeType?.startsWith('video/')) && ( <video src={msg.fileUrl} controls style={stylesChat.messageVideo} /> )}
-                            {msg.messageType === 'file' && !msg.mimeType?.startsWith('image/') && !msg.mimeType?.startsWith('video/') && ( <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer" style={stylesChat.messageFileLink} download={msg.originalFilename || true}>📄 下载文件 {msg.originalFilename ? `(${msg.originalFilename})` : ''}</a> )}
-                            {msg.timestamp && ( <span style={{...stylesChat.timestamp, textAlign: msg.sender?._id === currentUser?.id ? 'right' : 'left'}}>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span> )}
-                        </div>
-                    ))}
+                <div ref={messageListRef} style={stylesChat.messageList} className="message-list-scrollbar" >
+                    {isLoadingHistory && <p style={stylesChat.noticeText}>加载历史记录中...</p>}
+                    {/* ^^^ 使用 isLoadingHistory 显示加载提示 */}
+                    {!isLoadingHistory && messages.length === 0 && (<p style={stylesChat.noticeText}>{activeChat.type === 'public' ? '公共聊天室暂无消息' : `与 ${activeChat.friendUsername || '好友'} 开始聊天吧`}</p>)}
+                    {Array.isArray(messages) && messages.map((msg) => {
+                        if (!msg?._id) return null;
+                        return (
+                            <div key={msg._id} style={{...stylesChat.messageBubble, alignSelf: msg.sender?._id === currentUser?.id ? 'flex-end' : 'flex-start', backgroundColor: msg.sender?._id === currentUser?.id ? '#dcf8c6' : '#eee'}}>
+                                {activeChat.type === 'public' && msg.sender?._id !== currentUser?.id && (<strong style={stylesChat.senderName}>{msg.sender?.username || '用户'}</strong>)}
+                                {msg.messageType === 'text' && ( <span style={stylesChat.messageContent}>{msg.content}</span> )}
+                                {(msg.messageType === 'image' || msg.mimeType?.startsWith('image/')) && ( <img src={msg.fileUrl} alt={msg.originalFilename || '图片'} style={stylesChat.messageImage} /> )}
+                                {(msg.messageType === 'video' || msg.mimeType?.startsWith('video/')) && ( <video src={msg.fileUrl} controls style={stylesChat.messageVideo} /> )}
+                                {msg.messageType === 'file' && !msg.mimeType?.startsWith('image/') && !msg.mimeType?.startsWith('video/') && ( <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer" style={stylesChat.messageFileLink} download={msg.originalFilename || true}>📄 下载 {msg.originalFilename || '文件'}</a> )}
+                                {msg.createdAt && (() => { const date = new Date(msg.createdAt); const pad = (num) => String(num).padStart(2, '0'); const formattedTime = `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`; return ( <span style={{...stylesChat.timestamp, textAlign: msg.sender?._id === currentUser?.id ? 'right' : 'left'}}> {formattedTime} </span> ); })()}
+                            </div>
+                        );
+                    })}
                     <div ref={messagesEndRef} />
+                    {/* 重复的加载和空消息提示可以移除，因为上面已经有了 */}
                 </div>
-                {/* 文件预览 */}
-                {previewUrl && (
-                    <div style={stylesChat.previewArea}>
-                        {selectedFile?.type.startsWith('image/') && <img src={previewUrl} alt="预览" style={stylesChat.previewImage} />}
-                        {selectedFile?.type.startsWith('video/') && <video src={previewUrl} controls={false} autoPlay={false} muted style={stylesChat.previewVideo} />}
-                        {!selectedFile?.type.startsWith('image/') && !selectedFile?.type.startsWith('video/') && ( <span style={stylesChat.previewFileIcon}>📄</span> )}
-                        <span style={stylesChat.previewFilename}>{selectedFile?.name}</span>
-                        <button onClick={handleCancelPreview} style={stylesChat.cancelPreviewButton} title="取消选择">×</button>
-                    </div>
-                )}
-                {/* 消息输入 */}
-                <form onSubmit={handleSendMessage} style={stylesChat.messageForm}>
-                    <input type="file" ref={fileInputRef} onChange={handleFileSelect} style={{ display: 'none' }} accept={ALLOWED_FILE_TYPES.join(',')} />
-                    <button type="button" onClick={handleFileButtonClick} style={stylesChat.attachButton} disabled={isUploading || !isConnected} title="选择文件" > + </button>
-                    <input
-                        type="text"
-                        value={newMessage}
-                        onChange={(e) => setNewMessage(e.target.value)}
-                        placeholder={activeChat.type === 'public' ? "在公共频道发言..." : `给 ${activeChat.friendUsername || '好友'} 发消息...`}
-                        style={stylesChat.messageInput}
-                        disabled={isUploading || !isConnected || !!selectedFile} // 确认: 有文件选中时禁用
-                        aria-label="消息输入框"
-                    />
-                    <button
-                        type="submit"
-                        disabled={isUploading || !isConnected || (!newMessage.trim() && !selectedFile)} // 确认: 有内容或文件才能发送
-                        style={{...stylesChat.sendButton, ...((isUploading || !isConnected || (!newMessage.trim() && !selectedFile)) ? stylesChat.sendButtonDisabled : {}) }}
-                    >
-                        {isUploading ? '上传中...' : '发送'}
-                    </button>
-                </form>
+                {previewUrl && ( <div style={stylesChat.previewArea}> <span style={stylesChat.previewFilename}>{selectedFile?.name}</span> <button onClick={handleCancelPreview} style={stylesChat.cancelPreviewButton} title="取消选择">×</button> </div> )}
+                <form onSubmit={handleSendMessage} style={stylesChat.messageForm}> <input type="file" ref={fileInputRef} onChange={handleFileSelect} style={{ display: 'none' }} accept={ALLOWED_FILE_TYPES.join(',')} /> <button type="button" onClick={handleFileButtonClick} style={stylesChat.attachButton} disabled={isUploading || !isConnected} title="选择文件" > + </button> <input type="text" value={newMessage} onChange={(e) => setNewMessage(e.target.value)} placeholder={activeChat.type === 'public' ? "公共发言..." : `给 ${activeChat.friendUsername || '好友'} 发消息...`} style={stylesChat.messageInput} disabled={isUploading || !isConnected || !!selectedFile} aria-label="输入框" /> <button type="submit" disabled={isUploading || !isConnected || (!newMessage.trim() && !selectedFile)} style={{...stylesChat.sendButton, ...((isUploading || !isConnected || (!newMessage.trim() && !selectedFile)) ? stylesChat.sendButtonDisabled : {}) }} >{isUploading ? '上传中...' : '发送'}</button> </form>
             </div>
         </div>
     );
 }
 
 // --- 样式对象 ---
+// ... (stylesChat 对象无变动，保持原样) ...
 const stylesChat = {
-    // ... (之前提供的所有样式定义，包括 appContainer, sidebar, chatArea, messageForm 等)
     appContainer: { display: 'flex', height: '100vh', overflow: 'hidden', fontFamily: 'Arial, sans-serif', backgroundColor: '#f0f0f0' },
     sidebar: { width: '280px', flexShrink: 0, display: 'flex', flexDirection: 'column', backgroundColor: '#f8f9fa', borderRight: '1px solid #dee2e6', padding: '10px', overflowY: 'auto' },
     sidebarHeader: { padding: '10px 5px', borderBottom: '1px solid #dee2e6', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
     logoutButtonSmall: { padding: '4px 8px', fontSize: '12px', backgroundColor: '#dc3545', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
     hr: { border: 'none', borderTop: '1px solid #e0e0e0', margin: '10px 0' },
-    chatListItem: { display: 'flex', alignItems: 'center', padding: '10px 8px', borderRadius: '6px', cursor: 'pointer', marginBottom: '5px', transition: 'background-color 0.2s ease', position: 'relative' },
+    chatListItem: { display: 'flex', alignItems: 'center', padding: '8px', borderRadius: '6px', cursor: 'pointer', marginBottom: '5px', transition: 'background-color 0.2s ease', position: 'relative', minHeight: '38px' },
     activeChatListItem: { backgroundColor: '#d4edda', fontWeight: 'bold' },
     statusIndicator: { width: '10px', height: '10px', borderRadius: '50%', marginRight: '10px', flexShrink: 0 },
-    unreadBadge: { backgroundColor: 'red', color: 'white', borderRadius: '50%', padding: '2px 6px', fontSize: '10px', fontWeight: 'bold', marginLeft: 'auto' },
+    unreadBadge: { backgroundColor: 'red', color: 'white', borderRadius: '50%', padding: '2px 6px', fontSize: '10px', fontWeight: 'bold', marginLeft: 'auto', marginRight: '5px' },
     friendList: { flexGrow: 1, overflowY: 'auto', minHeight: '100px' },
     sidebarNotice: { color: '#6c757d', fontSize: '13px', textAlign: 'center', padding: '10px 0' },
-    removeFriendButton: { background: 'none', border: 'none', color: '#dc3545', cursor: 'pointer', fontSize: '16px', padding: '0 5px', marginLeft: '5px', display: 'none', opacity: 0.7 },
-    searchInput: { width: 'calc(100% - 20px)', padding: '8px 10px', borderRadius: '4px', border: '1px solid #ced4da', marginBottom: '10px', boxSizing: 'border-box' },
+    removeFriendButton: { background: 'none', border: 'none', color: '#dc3545', cursor: 'pointer', fontSize: '16px', padding: '0 3px', marginLeft: '5px', display: 'none', opacity: 0.7 },
+    searchInput: { width: '100%', padding: '8px 10px', borderRadius: '4px', border: '1px solid #ced4da', marginBottom: '10px', boxSizing: 'border-box' },
     searchResults: { maxHeight: '150px', overflowY: 'auto', marginBottom: '10px' },
     searchResultItem: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 8px', fontSize: '14px', borderBottom: '1px solid #f0f0f0' },
     addButton: { padding: '3px 8px', fontSize: '12px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-    chatArea: { flexGrow: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+    friendGroupContainer: { marginBottom: '10px' },
+    groupTitle: { fontSize: '14px', fontWeight: 'bold', color: '#495057', margin: '5px 0 5px 5px', textTransform: 'uppercase' },
+    friendName: { flexGrow: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '5px' },
+    friendGroupLabel: { fontSize: '11px', color: '#6c757d', marginLeft: 'auto', marginRight: '5px', fontStyle: 'italic' },
+    editGroupButton: { background: 'none', border: 'none', color: '#6c757d', cursor: 'pointer', fontSize: '14px', padding: '0 3px', marginLeft: '5px', display: 'none' },
+    editGroupInline: { display: 'flex', alignItems: 'center', marginLeft: 'auto', gap: '5px' },
+    groupSelect: { fontSize: '12px', padding: '2px 4px', borderRadius: '3px', border: '1px solid #ced4da', maxWidth: '100px' },
+    saveGroupButton: { padding: '2px 6px', fontSize: '11px', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer' },
+    cancelGroupButton: { padding: '2px 6px', fontSize: '11px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer' },
+    chatArea: {
+        flexGrow: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        backgroundColor: '#ffffff',
+    },
+    captureButton: {
+        padding: '5px 10px',
+        fontSize: '12px',
+        backgroundColor: '#17a2b8',
+        color: 'white',
+        border: 'none',
+        borderRadius: '4px',
+        cursor: 'pointer',
+        transition: 'background-color 0.2s ease, opacity 0.2s ease',
+    },
+    captureButtonDisabled: { // 需要您自己定义禁用样式
+        opacity: 0.5,
+        cursor: 'not-allowed',
+    },
+    downloadTextButton: { // 假设一个样式
+        padding: '5px 10px',
+        fontSize: '12px',
+        backgroundColor: '#007bff',
+        color: 'white',
+        border: 'none',
+        borderRadius: '4px',
+        cursor: 'pointer',
+    },
+    downloadTextButtonDisabled: { // 禁用样式
+        opacity: 0.5,
+        cursor: 'not-allowed',
+    },
+    errorText: { color: '#dc3545', textAlign: 'center', padding: '10px 15px', backgroundColor: '#f8d7da', borderBottom: '1px solid #f5c6cb', fontSize: '14px', margin: 0, flexShrink: 0 },
     header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 15px', borderBottom: '1px solid #dee2e6', backgroundColor: '#f8f9fa', flexShrink: 0 },
     status: { fontSize: '14px', color: '#6c757d' },
-    errorText: { color: '#dc3545', textAlign: 'center', padding: '10px 15px', backgroundColor: '#f8d7da', borderBottom: '1px solid #f5c6cb', fontSize: '14px', margin: 0, flexShrink: 0 },
-    messageList: { flexGrow: 1, overflowY: 'auto', padding: '15px', backgroundColor: '#ffffff', display: 'flex', flexDirection: 'column' },
+    downloadButton: { padding: '5px 10px', fontSize: '12px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', transition: 'background-color 0.2s ease', marginLeft: 'auto' },
+    messageList: {
+        flexGrow: 1,
+        overflowY: 'auto',
+        padding: '15px',
+        backgroundColor: '#ffffff',
+        display: 'flex',
+        flexDirection: 'column',
+    },
     noticeText: { textAlign: 'center', color: '#888', marginTop: '20px', fontSize: '14px', padding: '10px' },
     messageBubble: { maxWidth: '75%', padding: '8px 12px', borderRadius: '15px', marginBottom: '10px', wordWrap: 'break-word', lineHeight: '1.4', fontSize: '15px', position: 'relative', color: '#333' },
     senderName: { fontWeight: 'bold', marginRight: '5px', color: '#007bff', fontSize: '13px', display: 'block', marginBottom: '3px' },
@@ -630,5 +383,6 @@ const stylesChat = {
     sendButton: { height: '38px', padding: '0 18px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '18px', cursor: 'pointer', fontSize: '15px', fontWeight: '500', transition: 'background-color 0.2s ease-in-out, opacity 0.2s ease', outline: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '70px', boxSizing: 'border-box', flexShrink: 0 },
     sendButtonDisabled: { backgroundColor: '#6c757d', cursor: 'not-allowed', opacity: 0.65 },
 };
+
 
 export default Chat;

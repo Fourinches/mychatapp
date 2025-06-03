@@ -1,10 +1,12 @@
 // src/components/Login.js
 import React, { useState } from 'react';
 import axios from 'axios';
-// 导入 Link 用于跳转到注册页
 import { useNavigate, Link } from 'react-router-dom';
-// 导入 setAuthToken 工具函数
 import setAuthToken from '../utils/setAuthToken';
+
+// --- Import the CSS Module ---
+// Ensure the CSS file is named Login.module.css and in the same directory
+import styles from './Login.module.css';
 
 function Login() {
     const [formData, setFormData] = useState({
@@ -33,9 +35,8 @@ function Login() {
             if (res.data && res.data.token) {
                 // --- 保存 Token ---
                 localStorage.setItem('token', res.data.token);
-
                 // --- 设置 Axios 请求头 ---
-                setAuthToken(res.data.token); // <--- 调用导入的函数
+                setAuthToken(res.data.token);
 
                 setLoading(false);
                 navigate('/chat'); // 跳转到聊天页
@@ -49,71 +50,63 @@ function Login() {
             console.error('登录错误:', err.response || err);
             setError(errorMsg);
             localStorage.removeItem('token'); // 登录失败清除 token
-            setAuthToken(null); // <--- 登录失败也要清除 Axios 请求头
+            setAuthToken(null); // 登录失败也要清除 Axios 请求头
         }
     };
 
     return (
-        <div style={stylesLogin.container}>
-            <h2 style={stylesLogin.title}>登录</h2>
-            {error && <p style={stylesLogin.error}>{error}</p>}
-            <form onSubmit={onSubmit} style={stylesLogin.form}>
-                <div style={stylesLogin.inputGroup}>
-                    <label style={stylesLogin.label} htmlFor="email">邮箱:</label>
-                    <input
-                        style={stylesLogin.input}
-                        type="email"
-                        id="email"
-                        name="email"
-                        value={email}
-                        onChange={onChange}
-                        required
+        // --- Apply styles using className from the imported CSS Module ---
+        <div className={styles.container}> {/* Full page container with background */}
+            <div className={styles.loginBox}> {/* Inner box with acrylic effect */}
+                <h2 className={styles.title}>登录</h2> {/* Title style */}
+                {error && <p className={styles.error}>{error}</p>} {/* Error message style */}
+                <form onSubmit={onSubmit} className={styles.form}> {/* Form style */}
+                    <div className={styles.inputGroup}> {/* Input group style */}
+                        <label className={styles.label} htmlFor="email">邮箱:</label> {/* Label style */}
+                        <input
+                            className={styles.input} // Input style
+                            type="email"
+                            id="email"
+                            name="email"
+                            value={email}
+                            onChange={onChange}
+                            required
+                            disabled={loading}
+                            aria-required="true"
+                        />
+                    </div>
+                    <div className={styles.inputGroup}> {/* Input group style */}
+                        <label className={styles.label} htmlFor="password">密码:</label> {/* Label style */}
+                        <input
+                            className={styles.input} // Input style
+                            type="password"
+                            id="password"
+                            name="password"
+                            value={password}
+                            onChange={onChange}
+                            required
+                            disabled={loading}
+                            aria-required="true"
+                        />
+                    </div>
+                    <button
+                        type="submit"
+                        // Dynamically apply base and disabled classes using template literal
+                        className={`${styles.button} ${loading ? styles.buttonDisabled : ''}`}
                         disabled={loading}
-                        aria-required="true"
-                    />
-                </div>
-                <div style={stylesLogin.inputGroup}>
-                    <label style={stylesLogin.label} htmlFor="password">密码:</label>
-                    <input
-                        style={stylesLogin.input}
-                        type="password"
-                        id="password"
-                        name="password"
-                        value={password}
-                        onChange={onChange}
-                        required
-                        disabled={loading}
-                        aria-required="true"
-                    />
-                </div>
-                <button
-                    type="submit"
-                    style={loading ? { ...stylesLogin.button, ...stylesLogin.buttonDisabled } : stylesLogin.button}
-                    disabled={loading}
-                >
-                    {loading ? '正在登录...' : '登录'}
-                </button>
-            </form>
-            {/* *** 添加注册链接 *** */}
-            <p style={stylesLogin.registerLink}>
-                还没有账户？ <Link to="/register">点此注册</Link>
-            </p>
+                    >
+                        {loading ? '正在登录...' : '登录'}
+                    </button>
+                </form>
+                {/* Registration link */}
+                <p className={styles.registerLink}> {/* Register link container style */}
+                    还没有账户？ <Link to="/register">点此注册</Link>
+                </p>
+            </div>
         </div>
     );
 }
 
-// 内联样式对象 (保持不变)
-const stylesLogin = {
-    container: { maxWidth: '400px', margin: '50px auto', padding: '30px', border: '1px solid #ccc', borderRadius: '8px', boxShadow: '0 2px 5px rgba(0,0,0,0.1)', fontFamily: 'Arial, sans-serif', backgroundColor: '#f9f9f9', },
-    title: { textAlign: 'center', color: '#333', marginBottom: '25px', },
-    form: { display: 'flex', flexDirection: 'column', },
-    inputGroup: { marginBottom: '20px', },
-    label: { display: 'block', marginBottom: '5px', color: '#555', fontWeight: 'bold', },
-    input: { width: '100%', padding: '12px 15px', border: '1px solid #ccc', borderRadius: '4px', boxSizing: 'border-box', fontSize: '16px', },
-    button: { padding: '12px 20px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '16px', fontWeight: 'bold', transition: 'background-color 0.2s ease', marginTop: '10px', },
-    buttonDisabled: { backgroundColor: '#aaa', cursor: 'not-allowed', },
-    error: { color: '#dc3545', backgroundColor: '#f8d7da', border: '1px solid #f5c6cb', padding: '10px', borderRadius: '4px', textAlign: 'center', marginBottom: '20px', fontSize: '14px', },
-    registerLink: { textAlign: 'center', marginTop: '20px', fontSize: '14px', }
-};
+// The old inline styles object 'stylesLogin' is no longer needed and has been removed.
 
 export default Login;

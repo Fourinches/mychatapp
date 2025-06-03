@@ -14,17 +14,18 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const authMiddleware = require('./middleware/authMiddleware');
-
+const messageRouter = require("./routes/messageRoutes");
 connectDB();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+require("dotenv").config();
 
 // --- API 路由 ---
 app.use('/api/auth', authRouter);
 app.use('/api/friends', friendRouter); // 使用好友路由
-
+app.use('/api/message', messageRouter);
 // --- 文件上传 ---
 const uploadDir = 'uploads';
 if (!fs.existsSync(uploadDir)){ fs.mkdirSync(uploadDir); console.log(`创建上传目录: ${uploadDir}`); }
@@ -42,7 +43,7 @@ app.use(`/${uploadDir}`, express.static(path.join(__dirname, uploadDir)));
 // ----------------
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "http://localhost:3000", methods: ["GET", "POST"] } });
+const io = new Server(server, { cors: { origin: ["http://localhost:3000"], methods: ["GET", "POST"] } });
 
 app.get("/", (req, res) => { res.send("Chat Server is running!"); });
 
@@ -119,14 +120,30 @@ io.on('connection', (socket) => {
 
     // 处理获取私聊历史记录请求
     socket.on('getPrivateHistory', async ({ friendId }) => {
-        if (!friendId) {console.warn(`[getPrivateHistory] 缺少 friendId`); return;}
+        if (!friendId) { console.warn(`[getPrivateHistory] 缺少 friendId`); return; }
         console.log(`[getPrivateHistory] ${username} (${userId}) 请求与 ${friendId} 的历史`);
         try {
-            const messages = await Message.find({ isPrivate: true, $or: [{ sender: userId, recipient: friendId }, { sender: friendId, recipient: userId }] })
-                .sort({ timestamp: -1 }).limit(50).populate('sender', 'username _id').sort({ timestamp: 1 });
-            socket.emit('privateHistory', { friendId: friendId, history: messages });
-            console.log(`[getPrivateHistory] 已发送 ${messages.length} 条记录 (与 ${friendId}) 给 ${username}`);
-        } catch (error) { console.error(`[getPrivateHistory] Error (${userId}<=>${friendId}):`, error); socket.emit('messageError', { error: '无法加载私聊记录' }); }
+            // 1. 按创建时间倒序查找最新的 50 条
+            const messages = await Message.find({
+                isPrivate: true,
+                $or: [
+                    { sender: userId, recipient: friendId },
+                    { sender: friendId, recipient: userId }
+                ]
+            })
+                .sort({ createdAt: -1 }) // 按创建时间倒序
+                .limit(50)               // 限制最多 50 条
+                .populate('sender', 'username _id'); // 填充发送者信息
+
+            // 2. 反转数组，使得这 50 条中，最旧的在前面，符合聊天显示顺序
+            const sortedHistory = messages.reverse();
+
+            socket.emit('privateHistory', { friendId: friendId, history: sortedHistory });
+            console.log(`[getPrivateHistory] 已发送 ${sortedHistory.length} 条记录 (与 ${friendId}) 给 ${username}`);
+        } catch (error) {
+            console.error(`[getPrivateHistory] 获取私聊记录出错 (${userId}<=>${friendId}):`, error);
+            socket.emit('messageError', { error: '无法加载私聊记录' });
+        }
     });
 
     // 处理发送消息
@@ -141,7 +158,25 @@ io.on('connection', (socket) => {
         else { return socket.emit('messageError', { error: '不支持的消息类型' }); }
         try { const newMessage = new Message(newMessageData); await newMessage.save(); console.log(`[sendMessage] ${logMessageType} 消息已保存 by ${username}`, newMessageData); const populatedMessage = await Message.findById(newMessage._id).populate('sender', 'username _id'); console.log("[sendMessage] 准备发送/广播:", populatedMessage); if (isPrivate) { logMessageType += ` 私聊 to ${recipientId}`; const senderSocketIds = userSockets.get(userId) || new Set(); const recipientSocketIds = userSockets.get(recipientId) || new Set(); const targetSocketIds = new Set([...senderSocketIds, ...recipientSocketIds]); if (targetSocketIds.size > 0) { targetSocketIds.forEach(socketId => { io.to(socketId).emit('receivePrivateMessage', populatedMessage); }); console.log(`[sendMessage] ${logMessageType} 消息 ${populatedMessage._id} 已发送给 ${targetSocketIds.size} sockets`); } else { console.log(`[sendMessage] 私聊消息 ${populatedMessage._id} 已保存, 但接收者 ${recipientId} 不在线`); } } else { logMessageType += " 公共"; io.emit('newMessage', populatedMessage); console.log(`[sendMessage] ${logMessageType} 消息 ${populatedMessage._id} 已广播`); } } catch (error) { console.error(`[sendMessage] 保存或发送 ${logMessageType} 消息时出错:`, error); socket.emit('messageError', { error: '处理消息失败。' }); }
     });
+    socket.on('getPublicHistory', async () => {
+        console.log(`[getPublicHistory] ${username} (${userId}) 请求公共历史`);
+        try {
+            // 1. 按创建时间倒序查找最新的 50 条公共消息
+            const messages = await Message.find({ isPrivate: false })
+                .sort({ createdAt: -1 }) // 按创建时间倒序
+                .limit(50)               // 限制最多 50 条
+                .populate('sender', 'username _id'); // 填充发送者信息
 
+            // 2. 反转数组，使得这 50 条中，最旧的在前面
+            const sortedHistory = messages.reverse();
+
+            socket.emit('publicHistory', { history: sortedHistory }); // 使用新事件名
+            console.log(`[getPublicHistory] 已发送 ${sortedHistory.length} 条公共记录给 ${username}`);
+        } catch (error) {
+            console.error(`[getPublicHistory] 获取公共记录出错 for ${username}:`, error);
+            socket.emit('messageError', { error: '无法加载公共聊天记录' });
+        }
+    });
     // 处理断开连接
     socket.on('disconnect', (reason) => {
         const disconnectedUserId = socketUsers.get(socket.id);
@@ -167,4 +202,11 @@ io.on('connection', (socket) => {
 }); // io.on('connection', ...) 结束
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`服务器正在端口 ${PORT} 上运行`));
+
+server.listen(PORT, '::', () => {
+    console.log(`HTTP Server listening on port ${PORT} for ALL IPv4/IPv6 addresses`);
+    const address = server.address(); // 获取监听的详细信息
+    if (address) {
+        console.log(`Server accessible at: http://[${address.address}]:${address.port}`); // 注意 address.address 可能显示 ::
+    }
+});
