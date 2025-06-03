@@ -1,4 +1,5 @@
 // server/server.js (最终完整版)
+console.log("JWT_SECRET:", process.env.JWT_SECRET);
 require("dotenv").config();
 const express = require("express");
 const http = require("http");
