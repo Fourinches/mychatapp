@@ -1,0 +1,162 @@
+/* src/components/Login.module.css */
+
+.container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh; /* Ensure it covers the full viewport height */
+    padding: 20px; /* Add some padding */
+
+    /* --- Background --- */
+    /* --- OPTION 1: Background Image (Replace URL!) --- */
+    /* Choose a high-quality, subtle image. Example from Unsplash: */
+    background-image: url('https://images.unsplash.com/photo-1554034483-04fda0d3507b?ixlib=rb-4.0.3&ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&auto=format&fit=crop&w=1470&q=80');
+    /* --- OPTION 2: Gradient Fallback (Uncomment if you prefer) --- */
+    /* background: linear-gradient(135deg, #6e7f8f 0%, #1c2532 100%); */
+
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed; /* Keep background fixed during scroll */
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; /* Modern font stack */
+}
+
+.loginBox {
+    width: 100%;
+    max-width: 420px; /* Slightly wider form */
+    padding: 45px 35px; /* More padding */
+    border-radius: 15px; /* More pronounced rounding */
+
+    /* --- Acrylic/Glassmorphism Effect --- */
+    background: rgba(255, 255, 255, 0.1); /* Very subtle white background */
+    backdrop-filter: blur(12px); /* The key blur effect */
+    -webkit-backdrop-filter: blur(12px); /* For Safari */
+    border: 1px solid rgba(255, 255, 255, 0.18); /* Subtle border */
+    box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.15); /* Softer shadow */
+
+    text-align: center; /* Center title and link */
+}
+
+.title {
+    color: #f0f0f0; /* Lighter title color for potentially dark background */
+    margin-bottom: 30px;
+    font-weight: 600;
+    font-size: 2em; /* Larger title */
+}
+
+.form {
+    display: flex;
+    flex-direction: column;
+}
+
+.inputGroup {
+    margin-bottom: 25px; /* More space between inputs */
+    position: relative; /* Needed if you add icons later */
+}
+
+.label {
+    display: block; /* Make label take its own line */
+    text-align: left; /* Align label text to the left */
+    margin-bottom: 8px;
+    color: rgba(255, 255, 255, 0.8); /* Lighter label color */
+    font-weight: 500;
+    font-size: 0.9em;
+    padding: 5px 12px; /* Add padding to the label */
+    border-radius: 6px; /* Rounded corners for the label */
+
+    /* --- Acrylic "Feel" for Label --- */
+    background-color: rgba(255, 255, 255, 0.08); /* Faint background for label */
+    border: 1px solid rgba(255, 255, 255, 0.1); /* Faint border */
+    backdrop-filter: blur(1px); /* Very slight blur ON the label BG */
+    -webkit-backdrop-filter: blur(1px);
+    width: fit-content; /* Make label only as wide as content */
+    margin-left: 5px; /* Indent label slightly */
+    box-shadow: 0 2px 5px rgba(0,0,0, 0.05); /* Subtle shadow for depth */
+}
+
+.input {
+    width: 100%;
+    padding: 14px 18px; /* More padding */
+    border: 1px solid rgba(255, 255, 255, 0.2); /* Lighter border */
+    border-radius: 8px;
+    box-sizing: border-box;
+    font-size: 16px;
+    background-color: rgba(255, 255, 255, 0.85); /* Input background slightly opaque */
+    color: #212529; /* Darker text for readability */
+    transition: border-color 0.3s ease, box-shadow 0.3s ease; /* Smoother transitions */
+}
+
+.input:focus {
+    outline: none;
+    border-color: rgba(0, 123, 255, 0.5); /* Brighter focus border */
+    box-shadow: 0 0 0 4px rgba(0, 123, 255, 0.15); /* Focus glow */
+    background-color: rgba(255, 255, 255, 0.95); /* Slightly more opaque on focus */
+}
+
+.button {
+    padding: 14px 20px;
+    /* Updated Gradient Background */
+    background: linear-gradient(90deg, hsla(217, 100%, 50%, 1) 0%, hsla(217, 100%, 35%, 1) 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: bold;
+    transition: transform 0.2s cubic-bezier(0.25, 0.1, 0.25, 1), /* Smoother transform curve */
+    box-shadow 0.3s ease,
+    background 0.4s ease;
+    margin-top: 15px;
+    width: 100%;
+    box-shadow: 0 4px 15px rgba(0, 100, 255, 0.2); /* Subtle blue shadow */
+}
+
+/* --- Button Hover Animation --- */
+.button:hover:not(:disabled) {
+    transform: translateY(-3px) scale(1.02); /* Lift and slightly enlarge */
+    box-shadow: 0 8px 25px rgba(0, 100, 255, 0.3); /* Enhanced shadow */
+    /* Change gradient on hover */
+    background: linear-gradient(90deg, hsla(217, 100%, 55%, 1) 0%, hsla(217, 100%, 40%, 1) 100%);
+}
+
+/* --- Button Active (Click) Animation --- */
+.button:active:not(:disabled) {
+    transform: translateY(0px) scale(1); /* Press down */
+    box-shadow: 0 2px 10px rgba(0, 100, 255, 0.2); /* Smaller shadow */
+}
+
+.buttonDisabled {
+    background: #6c757d; /* Standard disabled grey */
+    box-shadow: none;
+    cursor: not-allowed;
+    opacity: 0.65;
+    transform: none !important; /* Prevent transforms when disabled */
+}
+
+.error {
+    color: #ffdddd; /* Lighter red for dark background */
+    background-color: rgba(220, 53, 69, 0.7); /* Semi-transparent red background */
+    border: 1px solid rgba(220, 53, 69, 0.8);
+    padding: 12px 15px;
+    border-radius: 6px;
+    text-align: center;
+    margin-bottom: 20px;
+    font-size: 14px;
+}
+
+.registerLink {
+    margin-top: 25px;
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.7); /* Lighter link text */
+}
+
+.registerLink a { /* Style the Link component specifically */
+    color: #80bdff; /* Light blue link color */
+    text-decoration: none;
+    font-weight: 600;
+    transition: color 0.2s ease;
+}
+
+.registerLink a:hover {
+    color: #a7d1ff; /* Lighter blue on hover */
+    text-decoration: underline;
+}
