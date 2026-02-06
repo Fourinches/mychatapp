@@ -4,21 +4,15 @@
 [![WebSocket](https://img.shields.io/badge/WebSocket-实时通讯-green.svg)](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> 基于Go语言开发的高性能实时聊天系统，支持私聊、群聊、历史消息存储，已部署上线稳定运行。
+> 基于Go语言开发的高性能实时聊天系统，支持私聊、群聊、历史消息存储，
 
-## 🚀 在线体验
-- **演示地址**：http://your-domain.com （你的域名）
-- **测试账号**：test / 123456
 
-## 📸 功能展示
-![聊天界面](screenshots/chat.png)
-![用户列表](screenshots/users.png)
 
 ## 🛠️ 技术架构
 
 ### 后端技术栈 (Go)
 - **核心框架**：Go + Gin Web Framework
-- **实时通讯**：WebSocket (gorilla/websocket)
+- **实时通讯**：WebSocket
 - **数据存储**：MySQL (消息持久化) + Redis (在线状态/缓存)
 - **并发处理**：Goroutine + Channel 实现高并发消息广播
 - **部署运维**：Docker容器化 + Nginx反向代理 + 云服务器
